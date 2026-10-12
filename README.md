@@ -8,6 +8,14 @@
 
 > **By [Rohan Muppa](https://github.com/rohanmuppa), ECE @ Purdue**
 
+> **NYU fork** by Robin Chen, configured for `brightspace.nyu.edu`. Differences from upstream:
+> - `get_course_progress`: running grade from released grades, work turned in / past due / upcoming, and content completion per module, as a Markdown report.
+> - Content completion works on tenants that 404 `/content/userprogress/` (falls back to per-topic completions).
+> - PDFs: page markers, incremental slide builds collapsed, `pages` ranges, and `pageImages` to render slides as PNG.
+> - DOCX/XLSX/PPTX keep headings, lists, tables, cell values, dates and speaker notes; notebooks and zip archives are readable inline.
+> - Current-term course filtering by default, with a `term` argument on `get_my_courses`.
+> - Roster finds NYU TAs and course assistants, and shows sections.
+
 Lets your AI see your Brightspace classes, so you can just ask:
 
 > "What's due this week?" · "Am I passing all my classes?" · "Summarize today's announcements" · "Turn my lecture slides into flashcards"
