@@ -71,7 +71,7 @@ export const SCHOOL_PRESETS: Record<string, SchoolPreset> = {
   },
   purdue: {
     name: "Purdue University",
-    baseUrl: "https://purdue.brightspace.com",
+    baseUrl: "https://brightspace.nyu.edu",
     usernameLabel: "Purdue career account username or full email",
     mfaNote: "Microsoft Authenticator number matching can run without a browser window.",
   },
@@ -562,11 +562,11 @@ async function main(): Promise<void> {
     while (!baseUrl) {
       const raw = await ask(
         rl,
-        "What is your Brightspace address? (e.g., purdue.brightspace.com): ",
+        "What is your Brightspace address? (e.g., brightspace.nyu.edu): ",
       );
       const normalized = normalizeUrl(raw);
       if (!raw || !isValidUrl(normalized)) {
-        console.log(yellow("  Please enter a valid address, like purdue.brightspace.com"));
+        console.log(yellow("  Please enter a valid address, like brightspace.nyu.edu"));
         continue;
       }
       baseUrl = normalized;

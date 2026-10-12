@@ -65,7 +65,7 @@ function resolveAccountLocation(store: ConfigStoreData | null): {
       ? expandTilde(store.sessionDir)
       : path.join(os.homedir(), ".d2l-session");
 
-  const configuredUrl = new URL(process.env.D2L_BASE_URL || store?.baseUrl || "https://purdue.brightspace.com");
+  const configuredUrl = new URL(process.env.D2L_BASE_URL || store?.baseUrl || "https://brightspace.nyu.edu");
   if (configuredUrl.protocol !== "https:" || configuredUrl.username || configuredUrl.password) {
     throw new Error("The Brightspace URL must be an HTTPS school URL without embedded credentials.");
   }
@@ -131,12 +131,14 @@ export async function loadConfig(): Promise<AppConfig> {
     ?? store?.activeOnly
     ?? true;
 
-  // Resolve currentOnly: env > store > default (false). When true, a course
-  // only passes the filter if Access.StartDate <= now <= Access.EndDate,
-  // matching Brightspace's "Current Courses" widget.
+  // Resolve currentOnly: env > store > default (true in the NYU fork). When
+  // true, a course only passes the filter if Access.StartDate <= now <=
+  // Access.EndDate, matching Brightspace's "Current Courses" widget. NYU keeps
+  // every enrollment back to first year active and accessible, so without
+  // this an all-courses call walks years of finished courses.
   const currentOnly = envBoolean(process.env.D2L_CURRENT_ONLY, "D2L_CURRENT_ONLY")
     ?? store?.currentOnly
-    ?? false;
+    ?? true;
 
   // D2L_ACCESS_TOKEN beats D2L_SESSION_COOKIE beats the normal stored-credential
   // browser flow; both are validated whenever present regardless of which one

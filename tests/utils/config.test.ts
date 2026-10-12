@@ -206,8 +206,8 @@ describe("resolved authentication configuration", () => {
   });
 
   describe("courseFilter.currentOnly", () => {
-    it("defaults to false", async () => {
-      expect((await loadConfig()).courseFilter.currentOnly).toBe(false);
+    it("defaults to true in the NYU fork", async () => {
+      expect((await loadConfig()).courseFilter.currentOnly).toBe(true);
     });
 
     it("reads currentOnly=true from the config file", async () => {
@@ -238,7 +238,7 @@ describe("resolved authentication configuration", () => {
     it("ignores an unrecognized D2L_CURRENT_ONLY and keeps the default", async () => {
       vi.stubEnv("D2L_CURRENT_ONLY", "maybe");
       const warn = vi.spyOn(console, "error").mockImplementation(() => {});
-      expect((await loadConfig()).courseFilter.currentOnly).toBe(false);
+      expect((await loadConfig()).courseFilter.currentOnly).toBe(true);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("Ignoring D2L_CURRENT_ONLY"));
       warn.mockRestore();
     });

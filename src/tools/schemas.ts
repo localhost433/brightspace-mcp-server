@@ -22,6 +22,13 @@ export const GetMyCoursesSchema = z.object({
     .describe(
       "Only return currently active courses. Defaults to the server's configured activeOnly setting (true unless overridden)."
     ),
+  term: z
+    .string()
+    .max(40)
+    .optional()
+    .describe(
+      "Which term's courses to list: \"current\" (courses running now), \"all\" (every enrollment, newest first), or a term such as \"FA25\" or \"Spring 2026\". Defaults to the server's currentOnly setting (current courses in this fork)."
+    ),
 });
 
 export const GetUpcomingDueDatesSchema = z.object({
@@ -168,9 +175,11 @@ export const GetRosterSchema = z.object({
   courseId: z.coerce.number().int().positive()
     .describe("Course ID to get roster for."),
   includeStudents: z.boolean().default(false)
-    .describe("Include students in results. Default is instructors and TAs only."),
+    .describe("Include students in results. Default is staff only (instructors, TAs, course assistants)."),
   searchTerm: z.string().max(200).optional()
     .describe("Optional search term to filter by name."),
+  section: z.string().max(200).optional()
+    .describe("Only people enrolled in a section whose name contains this text, e.g. \"002\" or \"Recitation 3\"."),
   limit: z.coerce.number().int().positive().max(1000).default(100)
     .describe("Maximum users to return. Default 100. The response reports the true total and whether it was truncated."),
 });

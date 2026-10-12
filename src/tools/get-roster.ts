@@ -26,23 +26,57 @@ export interface ClasslistUser {
   ClasslistRoleDisplayName: string;
   IsOnline: boolean;
   LastAccessed: string | null;
+  Username?: string | null;
+  Pronouns?: string | null;
 }
 
-// Purdue-specific role IDs. These are institution-specific values.
-// If using at another institution, you may need to adjust these.
-// Discover by fetching classlist for a known course and inspecting RoleId values.
-const INSTRUCTOR_ROLE_ID = 109;
-const TA_ROLE_ID = 135;
+// Staff role IDs are tenant-specific. 109 is Instructor at both NYU and
+// Purdue; Teaching Assistant is 114 at NYU and 135 at Purdue. Discover others
+// by fetching a classlist and inspecting RoleId values.
+const STAFF_ROLE_IDS = new Set([109, 114, 135]);
 
-// When the role-ID fast path above returns nothing — a non-Purdue tenant
-// where those IDs belong to different roles or none at all — staff are found
-// instead by matching the role name the tenant itself reports. Role-name
-// fallback adapted from matthewliu10/brightspace-mcp-server (MIT).
+// Staff are also recognized by the role name the tenant reports, which
+// covers roles with no fixed ID (NYU's "Non-Grading Course Assistant" has a
+// null RoleId). Role-name matching adapted from
+// matthewliu10/brightspace-mcp-server (MIT).
 const TEACHING_ROLE_NAME =
-  /\b(instructor|professor|lecturer|teaching assistant|coordinator|grader|ta)\b/i;
+  /\b(instructor|professor|lecturer|teaching assistant|course assistant|learning assistant|coordinator|grader|ta)\b/i;
 
-function isTeachingRoleByName(user: ClasslistUser): boolean {
-  return TEACHING_ROLE_NAME.test(user.ClasslistRoleDisplayName ?? "");
+function isStaff(user: ClasslistUser): boolean {
+  return (user.RoleId !== null && STAFF_ROLE_IDS.has(Number(user.RoleId)))
+    || TEACHING_ROLE_NAME.test(user.ClasslistRoleDisplayName ?? "");
+}
+
+interface SectionDto {
+  SectionId: number;
+  Name: string;
+  Code: string;
+  Enrollments?: number[] | null;
+}
+
+/** The course's sections, or null when the student API withholds them. */
+async function fetchSections(apiClient: D2LApiClient, courseId: number): Promise<SectionDto[] | null> {
+  try {
+    const sections = await apiClient.get<SectionDto[]>(apiClient.lp(`/${courseId}/sections/`), {
+      ttl: DEFAULT_CACHE_TTLS.roster,
+    });
+    return Array.isArray(sections) ? sections : null;
+  } catch (error) {
+    log("DEBUG", `get_roster: sections unavailable for course ${courseId}`, error);
+    return null;
+  }
+}
+
+async function fetchMyId(apiClient: D2LApiClient): Promise<number | null> {
+  try {
+    const me = await apiClient.get<{ Identifier: number | string }>(apiClient.lp("/users/whoami"), {
+      ttl: DEFAULT_CACHE_TTLS.profile,
+    });
+    const id = Number(me.Identifier);
+    return Number.isSafeInteger(id) ? id : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -91,7 +125,7 @@ export function registerGetRoster(
       title: "Get Course Roster",
       annotations: { readOnlyHint: true },
       description:
-        "Fetch the roster for a course including instructors, TAs, and optionally students with their names, emails, and roles. Use this when the user asks about classmates, instructor contact info, TA emails, professor names, or who's in a class. By default returns only instructors and TAs for privacy. Use includeStudents to get full class list.",
+        "Fetch the roster for a course including instructors, TAs, course assistants, and optionally students with their names, emails, roles, usernames (NetIDs), pronouns and sections. Also lists the course's sections with sizes and which section(s) you are in (mySections). Use this when the user asks about classmates, instructor contact info, TA emails, professor names, recitation sections, or who's in a class. By default returns only staff for privacy. Use includeStudents to get the full class list, and section to narrow to one section.",
       inputSchema: GetRosterSchema,
     },
     async (args: any) => {
@@ -99,73 +133,32 @@ export function registerGetRoster(
         log("DEBUG", "get_roster tool called", { args });
 
         // Parse and validate input
-        const { courseId, includeStudents, searchTerm, limit } = GetRosterSchema.parse(args);
+        const { courseId, includeStudents, searchTerm, section, limit } = GetRosterSchema.parse(args);
 
         try {
-          const allUsers: ClasslistUser[] = [];
-          let authFailure: PromiseRejectedResult | undefined;
-          let roleFallbackUsed = false;
+          // One classlist read serves both views. Staff are picked out by role
+          // ID or role name rather than by per-role queries, because some
+          // staff roles (NYU's course assistants) have no role ID to query.
+          // A failure here surfaces as a tool error (or authPending below)
+          // rather than an empty list.
+          const [everyone, sections, myId] = await Promise.all([
+            fetchClasslistUsers(apiClient, courseId, { searchTerm }),
+            fetchSections(apiClient, courseId),
+            fetchMyId(apiClient),
+          ]);
 
-          if (!includeStudents) {
-            // Fetch instructors and TAs in parallel
-            const [instructorResult, taResult] = await Promise.allSettled([
-              fetchClasslistUsers(apiClient, courseId, {
-                roleId: INSTRUCTOR_ROLE_ID,
-                searchTerm,
-              }),
-              fetchClasslistUsers(apiClient, courseId, {
-                roleId: TA_ROLE_ID,
-                searchTerm,
-              }),
-            ]);
-
-            // A pending sign-in means that route can't be trusted to have
-            // actually asked Brightspace anything — unlike a role group that
-            // is genuinely empty, which is a real measurement. Note it rather
-            // than quietly reporting half the roster as the whole answer, but
-            // keep whichever route *did* answer instead of discarding it: a
-            // roster that lost its TAs to a pending sign-in should still show
-            // the instructor it already has.
-            authFailure = [instructorResult, taResult].find(
-              (r): r is PromiseRejectedResult =>
-                r.status === "rejected" && isAuthUnavailable(r.reason)
-            );
-
-            // Merge results
-            if (instructorResult.status === "fulfilled") {
-              allUsers.push(...instructorResult.value);
-            } else {
-              log("WARN", "get_roster: Failed to fetch instructors", {
-                error: instructorResult.reason,
-              });
+          const sectionsByUser = new Map<number, string[]>();
+          for (const section of sections ?? []) {
+            for (const id of section.Enrollments ?? []) {
+              sectionsByUser.set(id, [...(sectionsByUser.get(id) ?? []), section.Name]);
             }
+          }
 
-            if (taResult.status === "fulfilled") {
-              allUsers.push(...taResult.value);
-            } else {
-              log("WARN", "get_roster: Failed to fetch TAs", {
-                error: taResult.reason,
-              });
-            }
-
-            // Purdue's role IDs found nobody — on a non-Purdue tenant they
-            // likely mean a different role, or none. Fall back to one
-            // unfiltered classlist fetch and match on the role display name
-            // the tenant itself reports instead of an institution-specific ID.
-            // A genuine failure of this fetch is intentionally not caught
-            // here: it should surface as a tool error rather than silently
-            // producing an empty staff list.
-            if (allUsers.length === 0) {
-              const everyone = await fetchClasslistUsers(apiClient, courseId, {
-                searchTerm,
-              });
-              allUsers.push(...everyone.filter(isTeachingRoleByName));
-              roleFallbackUsed = true;
-            }
-          } else {
-            // Fetch all users
-            allUsers.push(
-              ...(await fetchClasslistUsers(apiClient, courseId, { searchTerm }))
+          let selected = includeStudents ? everyone : everyone.filter(isStaff);
+          if (section) {
+            const wanted = section.toLowerCase();
+            selected = selected.filter((u) =>
+              (sectionsByUser.get(Number(u.Identifier)) ?? []).some((n) => n.toLowerCase().includes(wanted))
             );
           }
 
@@ -173,9 +166,9 @@ export function registerGetRoster(
           // cap is reported in the payload rather than only in a log line the
           // model never sees: a 340 person lecture used to look like a 100
           // person one, with nothing to say otherwise.
-          const total = allUsers.length;
+          const total = selected.length;
           const truncated = total > limit;
-          const kept = truncated ? allUsers.slice(0, limit) : allUsers;
+          const kept = truncated ? selected.slice(0, limit) : selected;
 
           if (truncated) {
             log("WARN", "get_roster: Result set exceeds the limit, truncating", {
@@ -184,18 +177,21 @@ export function registerGetRoster(
             });
           }
 
-          // Map to clean output
-          const users = kept.map((user) => ({
-            name: user.DisplayName,
-            email: user.Email || null,
-            role: user.ClasslistRoleDisplayName,
-          }));
+          const users = kept.map((user) => {
+            const userSections = sectionsByUser.get(Number(user.Identifier));
+            return {
+              name: user.DisplayName,
+              email: user.Email || null,
+              role: user.ClasslistRoleDisplayName,
+              ...(user.Username ? { username: user.Username } : {}),
+              ...(user.Pronouns ? { pronouns: user.Pronouns } : {}),
+              ...(userSections ? { sections: userSections } : {}),
+            };
+          });
 
-          log(
-            "INFO",
-            `get_roster: Retrieved ${users.length} users for course ${courseId}` +
-              (authFailure ? " (sign-in pending for one route)" : "")
-          );
+          const mySections = myId !== null ? sectionsByUser.get(myId) : undefined;
+
+          log("INFO", `get_roster: Retrieved ${users.length} users for course ${courseId}`);
           return toolResponse({
             courseId,
             total,
@@ -204,22 +200,13 @@ export function registerGetRoster(
             ...(truncated
               ? { note: `Showing ${users.length} of ${total}. Raise the limit argument to see more.` }
               : {}),
-            ...(roleFallbackUsed
+            ...(sections
               ? {
-                  roleFilter:
-                    "No users matched the default instructor/TA role IDs, so staff were found by matching role display names (instructor, professor, lecturer, teaching assistant, coordinator, grader, TA) instead.",
+                  sections: sections.map((s) => ({ name: s.Name, code: s.Code, size: s.Enrollments?.length ?? null })),
+                  ...(mySections ? { mySections } : {}),
                 }
               : {}),
             users,
-            ...(authFailure
-              ? {
-                  authPending: true,
-                  notice:
-                    "Sign-in to Brightspace is still in progress, so part of the roster for this " +
-                    `course could not be fetched yet. ${authPendingNotice(authFailure.reason)} Call ` +
-                    "get_roster again once sign-in finishes.",
-                }
-              : {}),
           });
         } catch (error) {
           // A pending sign-in is not an empty roster: the route never

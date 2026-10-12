@@ -128,108 +128,64 @@ describe("get_roster while sign-in is pending", () => {
     expect(parsed.notice).toContain("Approve the sign-in request");
   });
 
-  it("reports authPending when only the TA route is rejected with 401, keeping the instructor that did answer", async () => {
-    const { call } = setup((path) => {
-      if (path.includes("roleId=135")) throw new ApiError(401, path, "expired");
-      return { Objects: [user("prof")], Next: null };
+  it("reports authPending for the default staff view too", async () => {
+    const { call } = setup(() => {
+      throw mfaPending();
     });
 
-    const result = await call({ courseId: COURSE_ID });
+    const parsed = parse(await call({ courseId: COURSE_ID }));
 
-    expect(result.isError).toBeUndefined();
-    const parsed = parse(result);
-    expect(parsed).toMatchObject({ courseId: COURSE_ID, authPending: true });
-    expect(parsed.users.map((u: any) => u.name)).toEqual(["prof"]);
-    expect(parsed.notice).toContain("Authentication expired");
-  });
-
-  it("still returns instructors when the TA route fails for a non-auth reason", async () => {
-    const { call } = setup((path) => {
-      if (path.includes("roleId=135")) {
-        throw Object.assign(new Error("Forbidden"), { status: 403 });
-      }
-      return { Objects: [user("prof")], Next: null };
-    });
-
-    const result = await call({ courseId: COURSE_ID });
-
-    expect(result.isError).toBeUndefined();
-    const parsed = parse(result);
-    expect(parsed.authPending).toBeUndefined();
-    expect(parsed.users.map((u: any) => u.name)).toEqual(["prof"]);
+    expect(parsed).toMatchObject({ users: [], authPending: true });
   });
 });
 
 /**
- * The default staff view (includeStudents=false) found instructors and TAs by
- * Purdue's own role IDs (109/135). On any other tenant those IDs mean nothing
- * or belong to different roles, so the fast path quietly returned an empty
- * staff list. The role-ID path is still tried first — it stays exact and
- * cheap when it works — but when it comes back with zero users, one extra
- * unfiltered classlist fetch is made and matched against
- * ClasslistRoleDisplayName instead.
+ * Staff are picked out of one classlist read by role ID (109 Instructor;
+ * 114 NYU / 135 Purdue Teaching Assistant) or by role name. Per-role queries
+ * cannot find NYU's "Non-Grading Course Assistant", whose RoleId is null.
  */
-describe("get_roster role name fallback", () => {
-  const staffUser = (name: string, roleId: number, role: string) => ({
+describe("get_roster staff selection", () => {
+  const staffUser = (name: string, roleId: number | null, role: string | null) => ({
     ...user(name),
     RoleId: roleId,
     ClasslistRoleDisplayName: role,
   });
 
-  it("still uses the role-ID fast path when it returns rows", async () => {
-    const { call, requested } = setup((path) => {
-      if (path.includes("roleId=109")) {
-        return { Objects: [staffUser("prof", 109, "Instructor")], Next: null };
-      }
-      if (path.includes("roleId=135")) {
-        return { Objects: [staffUser("ta", 135, "Teaching Assistant")], Next: null };
-      }
-      throw new Error(`unexpected unfiltered fetch: ${path}`);
-    });
+  const classlist = (...users: unknown[]) => () => ({ Objects: users, Next: null });
+
+  it("finds staff by NYU and Purdue role IDs and by role name, excluding students", async () => {
+    const { call } = setup(
+      classlist(
+        staffUser("prof", 109, "Instructor"),
+        staffUser("nyu-ta", 114, "Teaching Assistant"),
+        staffUser("purdue-ta", 135, "TA"),
+        staffUser("assistant", null, "Non-Grading Course Assistant"),
+        staffUser("admin", 126, "Course Admin (Albert)"),
+        staffUser("learner", 110, "Student")
+      )
+    );
 
     const payload = parse(await call({ courseId: COURSE_ID }));
 
-    expect(payload.users.map((r: { name: string }) => r.name)).toEqual(["prof", "ta"]);
-    expect(payload.roleFilter).toBeUndefined();
-    expect(requested).toHaveLength(2);
-    expect(requested.every((p) => p.includes("roleId="))).toBe(true);
+    expect(payload.users.map((r: { name: string }) => r.name)).toEqual(["prof", "nyu-ta", "purdue-ta", "assistant"]);
   });
 
-  it("falls back to role display names when the role-ID path returns nothing, excluding students", async () => {
-    const { call, requested } = setup((path) => {
-      if (path.includes("roleId=")) return { Objects: [], Next: null };
-      return {
-        Objects: [
-          staffUser("prof", 501, "Instructor"),
-          staffUser("assistant", 502, "Teaching Assistant"),
-          staffUser("learner", 110, "Student"),
-        ],
-        Next: null,
-      };
-    });
-
-    const payload = parse(await call({ courseId: COURSE_ID }));
-
-    expect(payload.users.map((r: { name: string }) => r.name)).toEqual(["prof", "assistant"]);
-    expect(payload.roleFilter).toMatch(/display name/i);
-    expect(requested.some((p) => !p.includes("roleId="))).toBe(true);
-  });
-
-  it("excludes a user with a null role display name from the fallback", async () => {
-    const { call } = setup((path) => {
-      if (path.includes("roleId=")) return { Objects: [], Next: null };
-      return {
-        Objects: [
-          staffUser("prof", 501, "Instructor"),
-          { ...user("mystery"), ClasslistRoleDisplayName: null },
-        ],
-        Next: null,
-      };
-    });
+  it("excludes a user with a null role display name and no staff role ID", async () => {
+    const { call } = setup(classlist(staffUser("prof", 501, "Instructor"), staffUser("mystery", null, null)));
 
     const payload = parse(await call({ courseId: COURSE_ID }));
 
     expect(payload.users.map((r: { name: string }) => r.name)).toEqual(["prof"]);
+  });
+
+  it("matches Course Coordinator and Grader by name", async () => {
+    const { call } = setup(
+      classlist(staffUser("coord", 601, "Course Coordinator"), staffUser("grader", 602, "Grader"), staffUser("learner", 110, "Student"))
+    );
+
+    const payload = parse(await call({ courseId: COURSE_ID }));
+
+    expect(payload.users.map((r: { name: string }) => r.name)).toEqual(["coord", "grader"]);
   });
 
   it("reports a classlist error instead of returning an empty staff list", async () => {
@@ -237,26 +193,55 @@ describe("get_roster role name fallback", () => {
       throw new Error("classlist unavailable");
     });
 
-    const response = await call({ courseId: COURSE_ID });
+    expect((await call({ courseId: COURSE_ID })).isError).toBe(true);
+  });
+});
 
-    expect(response.isError).toBe(true);
+describe("get_roster sections", () => {
+  function setupWithSections() {
+    const apiClient = {
+      le: (orgUnitId: number, p: string) => `/d2l/api/le/1.0/${orgUnitId}${p}`,
+      lp: (p: string) => `/d2l/api/lp/1.0${p}`,
+      get: vi.fn(async (path: string) => {
+        if (path.endsWith("/users/whoami")) return { Identifier: "3" };
+        if (path.endsWith("/sections/")) {
+          return [
+            { SectionId: 1, Name: "Lecture 001", Code: "L001", Enrollments: [3, 4, 9] },
+            { SectionId: 2, Name: "Recitation 002", Code: "R002", Enrollments: [3, 9] },
+          ];
+        }
+        return {
+          Objects: [
+            { ...user("ada"), Identifier: "3", Username: "ada1", Pronouns: "she/her" },
+            { ...user("bob"), Identifier: "4" },
+            { ...user("prof"), Identifier: "9", RoleId: 109, ClasslistRoleDisplayName: "Instructor" },
+          ],
+          Next: null,
+        };
+      }),
+    };
+    let handler: (args: unknown) => Promise<any>;
+    registerGetRoster({ registerTool: (_n: string, _m: unknown, fn: any) => { handler = fn; } } as any, apiClient as any);
+    return (args: unknown) => handler!(args);
+  }
+
+  it("tags each person with their sections and lists mine", async () => {
+    const payload = parse(await setupWithSections()({ courseId: COURSE_ID, includeStudents: true }));
+
+    expect(payload.sections).toEqual([
+      { name: "Lecture 001", code: "L001", size: 3 },
+      { name: "Recitation 002", code: "R002", size: 2 },
+    ]);
+    expect(payload.mySections).toEqual(["Lecture 001", "Recitation 002"]);
+    expect(payload.users[0]).toEqual({
+      name: "ada", email: "ada@example.edu", role: "Student", username: "ada1", pronouns: "she/her",
+      sections: ["Lecture 001", "Recitation 002"],
+    });
   });
 
-  it("matches Course Coordinator and Grader via the fallback", async () => {
-    const { call } = setup((path) => {
-      if (path.includes("roleId=")) return { Objects: [], Next: null };
-      return {
-        Objects: [
-          staffUser("coord", 601, "Course Coordinator"),
-          staffUser("grader", 602, "Grader"),
-          staffUser("learner", 110, "Student"),
-        ],
-        Next: null,
-      };
-    });
+  it("narrows to one section", async () => {
+    const payload = parse(await setupWithSections()({ courseId: COURSE_ID, includeStudents: true, section: "002" }));
 
-    const payload = parse(await call({ courseId: COURSE_ID }));
-
-    expect(payload.users.map((r: { name: string }) => r.name)).toEqual(["coord", "grader"]);
+    expect(payload.users.map((u: any) => u.name)).toEqual(["ada", "prof"]);
   });
 });

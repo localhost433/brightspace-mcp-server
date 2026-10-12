@@ -126,12 +126,33 @@ describe("applyCourseFilter", () => {
           id: 100,
           name: "ends exactly now",
           isActive: true,
-          startDate: "2025-01-01T00:00:00.000Z",
+          startDate: new Date(NOW - 100 * 86_400_000).toISOString(),
           endDate: new Date(NOW).toISOString(),
         },
       ];
       const out = applyCourseFilter(courses, cfg({ currentOnly: true }), NOW);
       expect(out).toHaveLength(1);
+    });
+
+    it("drops an open-ended enrollment that started over a year ago", () => {
+      const courses: TestCourse[] = [
+        { id: 102, name: "Club", isActive: true, startDate: "2022-08-24T04:00:00.000Z", endDate: null },
+        { id: 103, name: "This term, no end", isActive: true, startDate: new Date(NOW - 30 * 86_400_000).toISOString(), endDate: null },
+      ];
+      expect(applyCourseFilter(courses, cfg({ currentOnly: true }), NOW).map((c) => c.id)).toEqual([103]);
+    });
+
+    it("drops a standing org unit whose window spans years", () => {
+      const courses: TestCourse[] = [
+        {
+          id: 101,
+          name: "Placement Exams Site",
+          isActive: true,
+          startDate: "2021-07-12T04:00:00.000Z",
+          endDate: "2032-12-31T04:59:00.000Z",
+        },
+      ];
+      expect(applyCourseFilter(courses, cfg({ currentOnly: true }), NOW)).toHaveLength(0);
     });
 
     it("drops a course whose endDate is 1 ms before now", () => {

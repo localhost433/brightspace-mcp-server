@@ -40,6 +40,9 @@ interface FilterableCourse {
  *
  * Adapted from LunaParker/brightspace-mcp-server (MIT), src/utils/course-filter.ts.
  */
+/** Longest enrollment window still treated as a term (a year-long course fits). */
+const MAX_TERM_SPAN_MS = 400 * 24 * 60 * 60 * 1000;
+
 function isCurrentlyInWindow(
   startDate: string | null | undefined,
   endDate: string | null | undefined,
@@ -55,6 +58,14 @@ function isCurrentlyInWindow(
   if (endDate) {
     const end = Date.parse(endDate);
     if (!Number.isNaN(end) && end < now) return false;
+  }
+  // A window spanning more than a year is a standing org unit (a placement
+  // exam site open 2021-2032), not a course being taken now. An open-ended
+  // window is measured to now, which also drops an old course whose end date
+  // was never set.
+  if (startDate) {
+    const span = (endDate ? Date.parse(endDate) : now) - Date.parse(startDate);
+    if (span > MAX_TERM_SPAN_MS) return false;
   }
   return true;
 }

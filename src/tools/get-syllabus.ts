@@ -15,6 +15,7 @@ import { DownloadError } from "../utils/download-errors.js";
 import { MAX_FILE_SIZE } from "../utils/file-validator.js";
 import { extractPdfText } from "../utils/pdf-extractor.js";
 import { log } from "../utils/logger.js";
+import { findContentSyllabus, type ContentSyllabus } from "./content-syllabus.js";
 import path from "node:path";
 import fs from "node:fs/promises";
 
@@ -169,6 +170,16 @@ async function discoverExternalSyllabusSources(
   return { fields, complete: unavailable.length === 0 };
 }
 
+/** The syllabus posted as course content, or null when there is none or it cannot be read. */
+async function contentSyllabusOrNull(apiClient: D2LApiClient, courseId: number): Promise<ContentSyllabus | null> {
+  try {
+    return await findContentSyllabus(apiClient, courseId);
+  } catch (error) {
+    log("DEBUG", `get_syllabus: content syllabus lookup failed for course ${courseId}`, error);
+    return null;
+  }
+}
+
 /**
  * Register get_syllabus tool
  */
@@ -181,7 +192,7 @@ export function registerGetSyllabus(
     {
       title: "Get Course Syllabus",
       description:
-        "Fetch the syllabus/overview text and optional attachment for a course. Returns the course overview description as markdown. When the syllabus lives in an external LTI tool (e.g. Simple Syllabus), lists those sources in externalSyllabusSources; their contents cannot be read. If some of those lookups could not be completed (e.g. permission denied), externalSyllabusDiscovery says which, and an empty result is then not proof the course has no syllabus. If downloadPath is provided, also downloads the syllabus attachment (e.g. PDF). IMPORTANT: You MUST ask the user where they want to save the file before calling this tool with a downloadPath.",
+        "Fetch the syllabus/overview text and optional attachment for a course. Returns the course overview description as markdown. When the Overview is empty, finds the syllabus posted as course content (a topic titled syllabus, or the topics in a Syllabus module) and returns it as contentSyllabus: its source topic, its extracted text when readable (files, HTML pages, public Google Docs), and any other candidates. When the syllabus lives in an external LTI tool (e.g. Simple Syllabus), lists those sources in externalSyllabusSources; their contents cannot be read. If some of those lookups could not be completed (e.g. permission denied), externalSyllabusDiscovery says which, and an empty result is then not proof the course has no syllabus. If downloadPath is provided, also downloads the syllabus attachment (e.g. PDF). IMPORTANT: You MUST ask the user where they want to save the file before calling this tool with a downloadPath.",
       inputSchema: GetSyllabusSchema,
     },
     async (args: any) => {
@@ -224,6 +235,10 @@ export function registerGetSyllabus(
         } catch (error) {
           if (error instanceof ApiError && error.status === 404) {
             const discovery = await discoverExternalSyllabusSources(apiClient, courseId);
+            const contentSyllabus = await contentSyllabusOrNull(apiClient, courseId);
+            if (contentSyllabus) {
+              return toolResponse({ courseId, description: null, hasAttachment: false, contentSyllabus, ...discovery.fields });
+            }
             return toolResponse({
               courseId,
               description: null,
@@ -349,6 +364,13 @@ export function registerGetSyllabus(
 
         if (download) {
           result.download = download;
+        }
+
+        // An empty Overview (the norm at NYU) usually means the syllabus was
+        // posted as course content instead.
+        if (!description?.trim() && !syllabusText) {
+          const contentSyllabus = await contentSyllabusOrNull(apiClient, courseId);
+          if (contentSyllabus) result.contentSyllabus = contentSyllabus;
         }
 
         Object.assign(result, (await discoverExternalSyllabusSources(apiClient, courseId)).fields);

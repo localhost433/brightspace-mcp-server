@@ -13,6 +13,7 @@ import {
 import { toolResponse, sanitizeError } from "./tool-helpers.js";
 import { log } from "../utils/logger.js";
 import { applyCourseFilter } from "../utils/course-filter.js";
+import { courseTerm, matchesTerm } from "../utils/term.js";
 import type { AppConfig } from "../types/index.js";
 
 interface EnrollmentItem {
@@ -45,7 +46,7 @@ export function registerGetMyCourses(
       title: "Get My Courses",
       annotations: { readOnlyHint: true },
       description:
-        "Fetch your enrolled Brightspace courses with names, codes, and IDs. Use this when the user asks about their courses, enrolled classes, what they're taking this semester, or needs a course ID for other queries.",
+        "Fetch your enrolled Brightspace courses with names, codes, IDs and term (e.g. \"Fall 2026\"). Use this when the user asks about their courses, enrolled classes, what they're taking this semester, or needs a course ID for other queries. Lists current courses by default; pass term: \"all\" for every enrollment or a term like \"SP26\" for a past semester.",
       inputSchema: GetMyCoursesSchema,
     },
     async (args: any) => {
@@ -53,7 +54,7 @@ export function registerGetMyCourses(
         log("DEBUG", "get_my_courses tool called", { args });
 
         // Parse and validate input
-        const { activeOnly: activeOnlyArg } = GetMyCoursesSchema.parse(args);
+        const { activeOnly: activeOnlyArg, term } = GetMyCoursesSchema.parse(args);
 
         // An explicit per-call argument wins; otherwise fall back to the configured
         // policy. Resolving once here keeps the API query and the post-fetch filter
@@ -84,9 +85,25 @@ export function registerGetMyCourses(
             startDate: item.Access.StartDate,
             endDate: item.Access.EndDate,
             lastAccessed: item.Access.LastAccessed,
+            term: courseTerm(item.OrgUnit.Code, item.Access.StartDate)?.label ?? null,
           })),
-          { ...config.courseFilter, activeOnly }
-        );
+          {
+            ...config.courseFilter,
+            activeOnly,
+            // An explicit term replaces the configured current-only window.
+            currentOnly: term === undefined ? config.courseFilter.currentOnly : term.trim().toLowerCase() === "current",
+          }
+        )
+          .filter((course) => {
+            const wanted = term?.trim().toLowerCase();
+            if (!wanted || wanted === "current" || wanted === "all") return true;
+            return matchesTerm(courseTerm(course.code, course.startDate), wanted);
+          })
+          // Newest first; undated org units (clubs, career sites) last.
+          .sort((a, b) => {
+            if (!a.startDate || !b.startDate) return Number(!a.startDate) - Number(!b.startDate);
+            return Date.parse(b.startDate) - Date.parse(a.startDate);
+          });
 
         log("INFO", `get_my_courses: Retrieved ${courses.length} courses`);
         return toolResponse(courses);
