@@ -92,5 +92,8 @@
     "mcgill",
     "javeriana",
     "ngee-ann"
-  ]
+  ],
+  "optionalDependencies": {
+    "@napi-rs/canvas": "^1.0.11"
+  }
 }

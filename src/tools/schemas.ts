@@ -92,6 +92,12 @@ export const DownloadFileSchema = z.object({
     .describe("Absolute path to the directory where the file should be saved on disk. Omit this to receive the file inline in the tool response instead — the right choice in clients like Claude Desktop, whose analysis/sandbox tools cannot see files an MCP server writes to its own host filesystem. Inline mode returns extracted text for PDFs and Office documents, an image block for jpeg/png/gif/webp, and a short description (pointing back to disk mode) for anything else, capped at 10MB and 400,000 characters of extracted text."),
   customFilename: z.string().max(255).optional()
     .describe("Custom filename for the downloaded file (include extension). If not provided, uses the original filename from Brightspace."),
+  pages: z.string().max(100).optional()
+    .describe("Inline PDFs only: page range to return, e.g. \"5\", \"10-20\", \"1,4-6\" or \"30-\". Omit for the whole document."),
+  pageImages: z.boolean().optional()
+    .describe("Inline PDFs only: return rendered PNG images of the pages instead of extracted text (max 8 per call). Use for slides whose equations, diagrams or plots matter. Without pages, renders the first 8 slides (final builds)."),
+  collapseSlideBuilds: z.boolean().optional()
+    .describe("Inline PDFs only: collapse incremental slide builds (a slide exported once per animation step) to the final build. Default true."),
 });
 
 export const GetSyllabusSchema = z.object({

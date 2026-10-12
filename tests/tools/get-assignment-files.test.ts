@@ -119,7 +119,10 @@ describe("fileKind", () => {
     expect(fileKind("deck.pptx")).toBe("pptx");
     expect(fileKind("diagram.png")).toBe("image");
     expect(fileKind("notes.md")).toBe("text");
-    expect(fileKind("archive.zip")).toBe("other");
+    expect(fileKind("archive.zip")).toBe("archive");
+    expect(fileKind("pa2.ipynb")).toBe("notebook");
+    expect(fileKind("hw1.tex")).toBe("text");
+    expect(fileKind("old.doc")).toBe("other");
     expect(fileKind("noextension")).toBe("other");
   });
 });

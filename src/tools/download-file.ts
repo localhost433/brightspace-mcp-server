@@ -23,8 +23,10 @@ import {
 } from "../utils/file-validator.js";
 import { secureStreamDownload, readBodyCapped } from "../utils/download-helpers.js";
 import { DownloadError } from "../utils/download-errors.js";
-import { extractPdfText } from "../utils/pdf-extractor.js";
-import { officeDocumentText } from "../utils/zip-extract.js";
+import { extractPdfText, parsePageRange, pdfPageCount, renderPdfPages } from "../utils/pdf-extractor.js";
+import { officeDocumentText } from "../utils/office-text.js";
+import { notebookText } from "../utils/notebook-text.js";
+import { archiveText } from "../utils/archive-text.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -93,8 +95,28 @@ const INLINE_OFFICE_MIMES = new Set([
   "application/vnd.openxmlformats-officedocument.presentationml.presentation", // .pptx
 ]);
 
+/** Zip archives, shown as a file listing plus the text of the files inside. */
+const INLINE_ARCHIVE_MIMES = new Set(["application/zip", "application/x-zip-compressed"]);
+
 /** Mime types whose bytes are safe to decode as UTF-8 and inline verbatim. */
 const INLINE_TEXT_MIMES = new Set(["text/plain", "text/csv", "text/html", "application/json"]);
+
+/** Caller choices that shape a download: the saved name, and how an inline PDF is read. */
+interface FileOptions {
+  customFilename?: string;
+  /** Page range for an inline PDF, e.g. "10-20". */
+  pages?: string;
+  /** Return rendered PNGs of the PDF's pages instead of their text. */
+  pageImages?: boolean;
+  /** Collapse incremental slide builds in an inline PDF (default true). */
+  collapseSlideBuilds?: boolean;
+}
+
+/**
+ * Most page images one inline response carries. A rendered slide is a few
+ * hundred KB, so this keeps the response well under client size limits.
+ */
+const MAX_PAGE_IMAGES = 8;
 
 /** Truncate text to `max` characters, noting how much was cut and why. */
 function truncateForInline(text: string, max: number): { body: string; truncated: boolean } {
@@ -107,6 +129,95 @@ function truncateForInline(text: string, max: number): { body: string; truncated
       "Re-run with an absolute downloadPath to save the full file to disk instead...]",
     truncated: true,
   };
+}
+
+/**
+ * An inline PDF: page-marked text (optionally a page range, with incremental
+ * slide builds collapsed), or rendered page images when the text cannot carry
+ * the math and figures.
+ */
+async function respondInlinePdf(
+  buffer: Buffer,
+  metadata: Record<string, unknown>,
+  options: FileOptions
+): Promise<CallToolResult> {
+  const content: CallToolResult["content"] = [];
+  const totalPages = await pdfPageCount(buffer);
+  if (totalPages === null) {
+    metadata.representation = "pdf_text_extraction_failed";
+    metadata.note = "This PDF could not be parsed. Re-run with an absolute downloadPath to save the raw file to disk.";
+    content.push({ type: "text", text: JSON.stringify(metadata) });
+    return withUpdateNotice(content);
+  }
+  metadata.pages = totalPages;
+
+  let range: number[] | undefined;
+  if (options.pages !== undefined) {
+    try {
+      range = parsePageRange(options.pages, totalPages);
+    } catch (error) {
+      return errorResponse((error as Error).message);
+    }
+  }
+
+  const collapseSlideBuilds = options.collapseSlideBuilds ?? true;
+
+  if (options.pageImages) {
+    let toRender = range;
+    if (toRender === undefined) {
+      // No range given: show the final build of each slide from the start.
+      const extracted = await extractPdfText(buffer, { collapseSlideBuilds });
+      const collapsed = new Set(extracted?.collapsedPages ?? []);
+      toRender = (extracted?.pagesIncluded ?? []).filter((p) => !collapsed.has(p));
+    }
+    if (toRender.length > MAX_PAGE_IMAGES && range !== undefined) {
+      return errorResponse(
+        `pageImages renders at most ${MAX_PAGE_IMAGES} pages per call; the range "${options.pages}" selects ${toRender.length}. Narrow the pages argument.`
+      );
+    }
+    const selected = toRender.slice(0, MAX_PAGE_IMAGES);
+    const rendered = await renderPdfPages(buffer, selected);
+    if (rendered !== null) {
+      metadata.representation = "page_images";
+      metadata.pagesRendered = rendered.map((r) => r.page);
+      if (toRender.length > selected.length) {
+        metadata.note = `Rendered the first ${selected.length} of ${toRender.length} slides. Pass pages (e.g. "${selected[selected.length - 1] + 1}-") to see more.`;
+      }
+      content.push({ type: "text", text: JSON.stringify(metadata) });
+      for (const { page, png } of rendered) {
+        if (png.length > INLINE_IMAGE_MAX_SIZE) {
+          content.push({ type: "text", text: `--- Page ${page}: image too large to inline ---` });
+          continue;
+        }
+        content.push({ type: "text", text: `--- Page ${page} ---` });
+        content.push({ type: "image", data: png.toString("base64"), mimeType: "image/png" });
+      }
+      return withUpdateNotice(content);
+    }
+    metadata.pageImagesNote = "Page rendering is unavailable (the optional @napi-rs/canvas package is not installed); returning text instead.";
+  }
+
+  const extracted = await extractPdfText(buffer, { pages: range, collapseSlideBuilds });
+  if (!extracted || !extracted.text) {
+    metadata.representation = "pdf_text_extraction_failed";
+    metadata.note =
+      "No text layer found in this PDF (it may be a scan). Call again with pageImages: true to see the pages, or with an absolute downloadPath to save the raw file to disk.";
+    content.push({ type: "text", text: JSON.stringify(metadata) });
+    return withUpdateNotice(content);
+  }
+  const { body, truncated } = truncateForInline(extracted.text, INLINE_TEXT_MAX_CHARS);
+  metadata.representation = "extracted_text";
+  if (range !== undefined) metadata.pagesIncluded = options.pages;
+  if (extracted.collapsedPages.length > 0) metadata.slideBuildPagesCollapsed = extracted.collapsedPages.length;
+  metadata.truncated = truncated;
+  metadata.hint =
+    "Equations, diagrams and plots are approximate in extracted text. To read them exactly, call again with pageImages: true and pages set to the slides you need.";
+  content.push({ type: "text", text: JSON.stringify(metadata) });
+  content.push({
+    type: "text",
+    text: `--- Extracted PDF text (${totalPages} page${totalPages === 1 ? "" : "s"})${truncated ? ", truncated" : ""} ---\n${body}`,
+  });
+  return withUpdateNotice(content);
 }
 
 /**
@@ -127,9 +238,9 @@ function truncateForInline(text: string, max: number): { body: string; truncated
 async function respondInline(
   buffer: Buffer,
   originalFilename: string,
-  customFilename: string | undefined
+  options: FileOptions
 ): Promise<CallToolResult> {
-  const effectiveFilename = customFilename || originalFilename;
+  const effectiveFilename = options.customFilename || originalFilename;
 
   if (buffer.length > INLINE_MAX_SIZE) {
     return errorResponse(
@@ -154,24 +265,11 @@ async function respondInline(
   const content: CallToolResult["content"] = [];
 
   if (mime === "application/pdf") {
-    const extracted = await extractPdfText(buffer);
-    if (!extracted || !extracted.text) {
-      metadata.representation = "pdf_text_extraction_failed";
-      metadata.note =
-        "No text layer found in this PDF (it may be a scan). Re-run with an absolute downloadPath to save the raw file to disk.";
-      content.push({ type: "text", text: JSON.stringify(metadata) });
-      return withUpdateNotice(content);
-    }
-    const { body, truncated } = truncateForInline(extracted.text, INLINE_TEXT_MAX_CHARS);
-    metadata.representation = "extracted_text";
-    metadata.pages = extracted.totalPages;
-    metadata.truncated = truncated;
-    content.push({ type: "text", text: JSON.stringify(metadata) });
-    content.push({
-      type: "text",
-      text: `--- Extracted PDF text (${extracted.totalPages} page${extracted.totalPages === 1 ? "" : "s"})${truncated ? ", truncated" : ""} ---\n${body}`,
-    });
-  } else if (INLINE_IMAGE_MIMES.has(mime)) {
+    return respondInlinePdf(buffer, metadata, options);
+  } else if (options.pageImages) {
+    metadata.pageImagesNote = "pageImages only applies to PDFs; returning this file's usual inline form.";
+  }
+  if (INLINE_IMAGE_MIMES.has(mime)) {
     if (buffer.length > INLINE_IMAGE_MAX_SIZE) {
       // Base64-encoding a file this size would exceed the model API's image
       // limit and fail the whole response, so this falls back to the same
@@ -202,6 +300,25 @@ async function respondInline(
     metadata.truncated = truncated;
     content.push({ type: "text", text: JSON.stringify(metadata) });
     content.push({ type: "text", text: `--- Extracted text (${effectiveFilename}) ---\n${body}` });
+  } else if (/\.ipynb$/i.test(effectiveFilename) && notebookText(buffer.toString("utf-8")) !== null) {
+    const { body, truncated } = truncateForInline(notebookText(buffer.toString("utf-8"))!, INLINE_TEXT_MAX_CHARS);
+    metadata.representation = "notebook";
+    metadata.truncated = truncated;
+    content.push({ type: "text", text: JSON.stringify(metadata) });
+    content.push({ type: "text", text: `--- Notebook (${effectiveFilename}) ---\n${body}` });
+  } else if (INLINE_ARCHIVE_MIMES.has(mime)) {
+    const text = await archiveText(buffer);
+    if (!text) {
+      metadata.representation = "binary_description_only";
+      metadata.note = "This archive could not be read. Re-run download_file with an absolute downloadPath to save it to disk instead.";
+      content.push({ type: "text", text: JSON.stringify(metadata) });
+      return withUpdateNotice(content);
+    }
+    const { body, truncated } = truncateForInline(text, INLINE_TEXT_MAX_CHARS);
+    metadata.representation = "archive_listing";
+    metadata.truncated = truncated;
+    content.push({ type: "text", text: JSON.stringify(metadata) });
+    content.push({ type: "text", text: `--- ${effectiveFilename} ---\n${body}` });
   } else if (INLINE_TEXT_MIMES.has(mime)) {
     const raw = buffer.toString("utf-8");
     const { body, truncated } = truncateForInline(raw, INLINE_TEXT_MAX_CHARS);
@@ -231,7 +348,7 @@ async function finishDownload(
   response: Response,
   originalFilename: string,
   downloadPath: string | undefined,
-  customFilename: string | undefined,
+  options: FileOptions,
   sourceLabel: string
 ): Promise<CallToolResult> {
   // Check Content-Length BEFORE reading the body (prevent memory exhaustion)
@@ -252,10 +369,10 @@ async function finishDownload(
       }
       throw error;
     }
-    return respondInline(buffer, originalFilename, customFilename);
+    return respondInline(buffer, originalFilename, options);
   }
 
-  const effectiveFilename = customFilename || originalFilename;
+  const effectiveFilename = options.customFilename || originalFilename;
 
   if (!response.body) {
     throw new DownloadError("undetectableType", "File is empty (0 bytes)");
@@ -298,7 +415,7 @@ export function registerDownloadFile(
     {
       title: "Download File",
       description:
-        "Download a file from course content, instructor assignment attachments (source: assignmentAttachment with folderId + fileId), assignment submissions, or an announcement's attachments. Use this when the user wants a file from Brightspace course content, dropbox submissions, or an announcement (newsId + fileId, from get_announcements). Two response modes: (1) INLINE (default — omit downloadPath): the file comes back directly in the tool response — extracted text for PDFs and Office documents, an image block for jpeg/png/gif/webp, or a short description for anything else — so it can be read immediately without touching any filesystem. This is the right choice in clients like Claude Desktop, whose analysis/sandbox tools cannot see a file the MCP server writes to its own host filesystem. (2) DISK (set downloadPath to an absolute path on the HOST filesystem the MCP server runs on): the file is saved there. Ask the user where to save it before using disk mode — never guess a directory. After identifying the file, suggest a clean readable filename (e.g., 'Lecture 7 - Memory Management.pdf' instead of 'L07_CS251_2026SP_v2.pdf') and pass it as customFilename, or omit it to keep the original. If a content-topic download fails because the file isn't released yet, the response explains why when Brightspace's module/topic metadata supports it (not yet open, ended, locked, or hidden).",
+        "Download a file from course content, instructor assignment attachments (source: assignmentAttachment with folderId + fileId), assignment submissions, or an announcement's attachments. Use this when the user wants a file from Brightspace course content, dropbox submissions, or an announcement (newsId + fileId, from get_announcements). Two response modes: (1) INLINE (default — omit downloadPath): the file comes back directly in the tool response — extracted text for PDFs and Office documents, an image block for jpeg/png/gif/webp, or a short description for anything else — so it can be read immediately without touching any filesystem. PDF text is marked by page, with incremental slide builds collapsed; pass pages to read part of a long PDF, and pageImages: true to see rendered slides when equations, diagrams or plots matter. This is the right choice in clients like Claude Desktop, whose analysis/sandbox tools cannot see a file the MCP server writes to its own host filesystem. (2) DISK (set downloadPath to an absolute path on the HOST filesystem the MCP server runs on): the file is saved there. Ask the user where to save it before using disk mode — never guess a directory. After identifying the file, suggest a clean readable filename (e.g., 'Lecture 7 - Memory Management.pdf' instead of 'L07_CS251_2026SP_v2.pdf') and pass it as customFilename, or omit it to keep the original. If a content-topic download fails because the file isn't released yet, the response explains why when Brightspace's module/topic metadata supports it (not yet open, ended, locked, or hidden).",
       inputSchema: DownloadFileSchema,
     },
     async (args: any) => {
@@ -306,8 +423,11 @@ export function registerDownloadFile(
         log("DEBUG", "download_file tool called", { args });
 
         // Parse and validate input
-        const { courseId, topicId, folderId, newsId, fileId, downloadPath, customFilename, source } =
-          DownloadFileSchema.parse(args);
+        const {
+          courseId, topicId, folderId, newsId, fileId, downloadPath, customFilename, source,
+          pages, pageImages, collapseSlideBuilds,
+        } = DownloadFileSchema.parse(args);
+        const fileOptions: FileOptions = { customFilename, pages, pageImages, collapseSlideBuilds };
 
         if (source !== undefined && (topicId !== undefined || newsId !== undefined || folderId === undefined || fileId === undefined)) {
           return errorResponse("source requires folderId and fileId and cannot be combined with topicId or newsId.");
@@ -347,6 +467,7 @@ export function registerDownloadFile(
 
         // Determine download source
         if (topicId !== undefined) {
+
           // Content file download
           validateContentId(topicId);
           return await downloadContentFile(
@@ -354,7 +475,7 @@ export function registerDownloadFile(
             courseId,
             topicId,
             downloadPath,
-            customFilename
+            fileOptions
           );
         } else if (folderId !== undefined && fileId !== undefined) {
           // Submission file download
@@ -366,7 +487,7 @@ export function registerDownloadFile(
             folderId,
             fileId,
             downloadPath,
-            customFilename
+            fileOptions
           );
         } else if (newsId !== undefined && fileId !== undefined) {
           // Announcement attachment download
@@ -378,7 +499,7 @@ export function registerDownloadFile(
             newsId,
             fileId,
             downloadPath,
-            customFilename
+            fileOptions
           );
         } else {
           return errorResponse(
@@ -399,7 +520,7 @@ async function downloadAssignmentAttachment(
   folderId: number,
   fileId: number,
   downloadPath: string | undefined,
-  customFilename?: string
+  options: FileOptions = {}
 ): Promise<CallToolResult> {
   const raw = await apiClient.get<unknown>(apiClient.le(courseId, "/dropbox/folders/"));
   const folders = Array.isArray(raw) ? raw : (raw as any)?.Objects ?? [];
@@ -411,7 +532,7 @@ async function downloadAssignmentAttachment(
   if (file.Size > maxFileSize(downloadPath)) return tooLargeResponse(file.Size, downloadPath);
   const response = await apiClient.getRaw(apiClient.le(courseId, `/dropbox/folders/${folderId}/attachments/${fileId}`));
   const filename = parseContentDispositionFilename(response.headers.get("Content-Disposition") ?? "") ?? file.FileName;
-  return finishDownload(response, filename, downloadPath, customFilename, "Assignment attachment");
+  return finishDownload(response, filename, downloadPath, options, "Assignment attachment");
 }
 
 /**
@@ -449,7 +570,7 @@ async function downloadContentFile(
   courseId: number,
   topicId: number,
   downloadPath: string | undefined,
-  customFilename?: string
+  options: FileOptions = {}
 ): Promise<any> {
   log(
     "INFO",
@@ -480,7 +601,7 @@ async function downloadContentFile(
 
   const originalFilename = filename;
 
-  return finishDownload(response, originalFilename, downloadPath, customFilename, "Content file");
+  return finishDownload(response, originalFilename, downloadPath, options, "Content file");
 }
 
 /**
@@ -492,7 +613,7 @@ async function downloadSubmissionFile(
   folderId: number,
   fileId: number,
   downloadPath: string | undefined,
-  customFilename?: string
+  options: FileOptions = {}
 ): Promise<any> {
   log(
     "INFO",
@@ -570,7 +691,7 @@ async function downloadSubmissionFile(
 
   const originalFilename = file.FileName;
 
-  return finishDownload(response, originalFilename, downloadPath, customFilename, "Submission file");
+  return finishDownload(response, originalFilename, downloadPath, options, "Submission file");
 }
 
 /**
@@ -582,7 +703,7 @@ async function downloadNewsAttachment(
   newsId: number,
   fileId: number,
   downloadPath: string | undefined,
-  customFilename?: string
+  options: FileOptions = {}
 ): Promise<any> {
   log(
     "INFO",
@@ -625,5 +746,5 @@ async function downloadNewsAttachment(
 
   const originalFilename = filename;
 
-  return finishDownload(response, originalFilename, downloadPath, customFilename, "Announcement attachment");
+  return finishDownload(response, originalFilename, downloadPath, options, "Announcement attachment");
 }

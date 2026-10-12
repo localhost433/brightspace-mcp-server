@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { deflateRawSync } from "node:zlib";
-import { extractZipEntry, officeDocumentText } from "../../src/utils/zip-extract.js";
+import { extractZipEntry } from "../../src/utils/zip-extract.js";
+import { officeDocumentText } from "../../src/utils/office-text.js";
 
 /**
  * DOCX, XLSX, and PPTX are ZIP archives, and the attachments actually found on

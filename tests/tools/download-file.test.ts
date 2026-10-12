@@ -1,3 +1,4 @@
+import { gzipSync } from "node:zlib";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -621,6 +622,37 @@ describe("download_file: inline mode (downloadPath omitted)", () => {
     expect(textOf(result)).toContain("Homework 3 is due Friday");
   });
 
+  // Rendering loads the native canvas library and pdf.js on first use, which
+  // can take several seconds when the whole suite runs in parallel.
+  it("renders a PDF's pages as PNG images when pageImages is set", async () => {
+    const { call } = setup({
+      disposition: 'attachment; filename="Lecture 7.pdf"',
+      body: minimalPdf("Homework 3 is due Friday"),
+    });
+
+    const result = await call({ courseId: COURSE, topicId: 7, pageImages: true, pages: "1" });
+
+    expect(result.isError).toBeUndefined();
+    const metadata = parse(result);
+    expect(metadata.representation).toBe("page_images");
+    expect(metadata.pagesRendered).toEqual([1]);
+    const imageBlock = result.content.find((c: any) => c.type === "image");
+    expect(imageBlock.mimeType).toBe("image/png");
+    expect(Buffer.from(imageBlock.data, "base64").subarray(1, 4).toString()).toBe("PNG");
+  }, 30_000);
+
+  it("refuses a page range that selects nothing in the PDF", async () => {
+    const { call } = setup({
+      disposition: 'attachment; filename="Lecture 7.pdf"',
+      body: minimalPdf("Homework 3 is due Friday"),
+    });
+
+    const result = await call({ courseId: COURSE, topicId: 7, pages: "4-9" });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/selects no pages/);
+  });
+
   it("returns an ImageContent block for an image when downloadPath is omitted", async () => {
     const { call } = setup({
       disposition: 'attachment; filename="diagram.jpg"',
@@ -790,7 +822,7 @@ describe("download_file: inline mode (downloadPath omitted)", () => {
     expect(textOf(result)).toContain("downloadPath");
   });
 
-  it("reports binary_description_only and points to downloadPath for a type with no inline representation", async () => {
+  it("lists a zip archive's files inline instead of refusing it", async () => {
     const { call } = setup({
       disposition: 'attachment; filename="archive.zip"',
       body: plainZipBuffer(),
@@ -800,8 +832,23 @@ describe("download_file: inline mode (downloadPath omitted)", () => {
 
     expect(result.isError).toBeUndefined();
     const metadata = parse(result);
-    expect(metadata.mode).toBe("inline");
     expect(metadata.mimeType).toBe("application/zip");
+    expect(metadata.representation).toBe("archive_listing");
+    expect(textOf(result)).toContain("Archive contents");
+  });
+
+  it("reports binary_description_only and points to downloadPath for a type with no inline representation", async () => {
+    const { call } = setup({
+      disposition: 'attachment; filename="data.gz"',
+      body: gzipSync(Buffer.from("x".repeat(100))),
+    });
+
+    const result = await call({ courseId: COURSE, topicId: 7 });
+
+    expect(result.isError).toBeUndefined();
+    const metadata = parse(result);
+    expect(metadata.mode).toBe("inline");
+    expect(metadata.mimeType).toBe("application/gzip");
     expect(metadata.representation).toBe("binary_description_only");
     expect(metadata.note).toContain("downloadPath");
     // Only the one metadata block — no attempt to inline the raw bytes.

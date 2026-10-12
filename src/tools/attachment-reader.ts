@@ -6,7 +6,9 @@
 
 import { D2LApiClient } from "../api/index.js";
 import { extractPdfText } from "../utils/pdf-extractor.js";
-import { officeDocumentText } from "../utils/zip-extract.js";
+import { officeDocumentText } from "../utils/office-text.js";
+import { notebookText } from "../utils/notebook-text.js";
+import { archiveText } from "../utils/archive-text.js";
 import { readBodyCapped } from "../utils/download-helpers.js";
 import { DownloadError } from "../utils/download-errors.js";
 import { MAX_FILE_SIZE } from "../utils/file-validator.js";
@@ -24,7 +26,7 @@ export interface D2LFileAttachment {
   Size: number;
 }
 
-type FileKind = "pdf" | "docx" | "xlsx" | "pptx" | "image" | "text" | "other";
+type FileKind = "pdf" | "docx" | "xlsx" | "pptx" | "notebook" | "archive" | "image" | "text" | "other";
 
 const KIND_BY_EXTENSION: Record<string, FileKind> = {
   pdf: "pdf",
@@ -43,6 +45,12 @@ const KIND_BY_EXTENSION: Record<string, FileKind> = {
   md: "text",
   csv: "text",
   json: "text",
+  ipynb: "notebook",
+  zip: "archive",
+  ...Object.fromEntries(
+    ["tex", "bib", "py", "r", "rmd", "m", "jl", "java", "c", "h", "cpp", "hpp", "cc", "js", "ts", "go", "rs", "sql", "sh", "yaml", "yml", "tsv", "html"]
+      .map((ext) => [ext, "text" as FileKind])
+  ),
 };
 
 export function fileKind(fileName: string): FileKind {
@@ -109,6 +117,16 @@ export async function readAttachment(
     case "pptx": {
       text = officeDocumentText(buffer);
       if (!text) note = "No readable text found in this Office document.";
+      break;
+    }
+    case "notebook": {
+      text = notebookText(buffer.toString("utf-8"));
+      if (!text) note = "This notebook could not be parsed.";
+      break;
+    }
+    case "archive": {
+      text = await archiveText(buffer);
+      if (!text) note = "This archive could not be read. Use download_file to save it.";
       break;
     }
     case "text": {
