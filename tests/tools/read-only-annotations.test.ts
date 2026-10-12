@@ -37,7 +37,7 @@ function registrations(): Array<{ name: string; config: string }> {
 
 describe("read-only tool annotations", () => {
   it("finds every tool the server registers", () => {
-    expect(registrations().length).toBe(26);
+    expect(registrations().length).toBe(27);
   });
 
   it.each(registrations().filter(({ name }) => !WRITES_TO_DISK.has(name) && !DESTRUCTIVE.has(name)))("marks $name read-only", ({ config }) => {

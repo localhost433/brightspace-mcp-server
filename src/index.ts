@@ -24,6 +24,7 @@ import {
   registerGetUpcomingDueDates,
   registerGetCalendarEvents,
   registerGetMyGrades,
+  registerGetCourseProgress,
   registerGetAnnouncements,
   registerGetAssignments,
   registerGetAssignmentRubric,
@@ -176,6 +177,7 @@ if (subcommand === 'setup') {
       registerGetUpcomingDueDates(server, apiClient, config);
       registerGetCalendarEvents(server, apiClient, config);
       registerGetMyGrades(server, apiClient, config);
+      registerGetCourseProgress(server, apiClient, config);
       registerGetAnnouncements(server, apiClient, config);
       registerGetAssignments(server, apiClient, config);
       registerGetAssignmentRubric(server, apiClient);

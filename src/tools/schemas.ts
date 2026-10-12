@@ -44,6 +44,13 @@ export const GetMyGradesSchema = z.object({
   courseId: z.coerce.number().int().positive().optional().describe("Course ID to get grades for. If omitted, returns grades for all enrolled courses."),
 });
 
+export const GetCourseProgressSchema = z.object({
+  courseId: z.coerce.number().int().positive().optional()
+    .describe("Course ID to report on. If omitted, reports on every current course."),
+  includeContent: z.boolean().optional()
+    .describe("Include content-topic completion per module (one request per topic). Default true for a single course, false for all courses."),
+});
+
 export const GetAnnouncementsSchema = z.object({
   courseId: z.coerce.number().int().positive().optional().describe("Course ID to get announcements for. If omitted, returns recent announcements across all courses."),
   count: z.coerce.number().int().min(1).max(50).default(10).describe("Announcements per page: 1-50 (default 10)."),

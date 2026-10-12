@@ -9,6 +9,7 @@ export { registerGetMyCourses } from "./get-my-courses.js";
 export { registerGetUpcomingDueDates } from "./get-upcoming-due-dates.js";
 export { registerGetCalendarEvents } from "./get-calendar-events.js";
 export { registerGetMyGrades } from "./get-my-grades.js";
+export { registerGetCourseProgress } from "./get-course-progress.js";
 export { registerGetAnnouncements } from "./get-announcements.js";
 export { registerGetAssignments } from "./get-assignments.js";
 export { registerGetAssignmentRubric } from "./get-assignment-rubric.js";
