@@ -204,6 +204,10 @@ function setup({ disposition, submissions, newsItem, contentLength, body = pdfBu
   const apiClient = {
     le: (orgUnitId: number, p: string) => `/d2l/api/le/1.0/${orgUnitId}${p}`,
     get: vi.fn(async (p: string) => (p.includes("/news/") ? newsItem : submissions)),
+    getCourseFile: vi.fn(async (p: string) => {
+      rawRequested.push(`file:${p}`);
+      return new Response(body instanceof Buffer ? toArrayBuffer(body) : body, { status: 200 });
+    }),
     getRaw: vi.fn(async (p: string) => {
       rawRequested.push(p);
       return new Response(body instanceof Buffer ? toArrayBuffer(body) : body, {
@@ -620,6 +624,30 @@ describe("download_file: inline mode (downloadPath omitted)", () => {
     expect(metadata.mimeType).toBe("application/pdf");
     expect(metadata.representation).toBe("extracted_text");
     expect(textOf(result)).toContain("Homework 3 is due Friday");
+  });
+
+  it("downloads a course file linked from a page by its /content/ path", async () => {
+    const { call, rawRequested } = setup({ body: minimalPdf("Why Parallel Computing?") });
+
+    const result = await call({
+      courseId: COURSE,
+      path: "/content/enforced/617117-FA26_CSCI-UA_480_1_051_crse/introduction%20v2.pdf",
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(rawRequested).toEqual(["file:/content/enforced/617117-FA26_CSCI-UA_480_1_051_crse/introduction%20v2.pdf"]);
+    const metadata = parse(result);
+    expect(metadata.filename).toBe("introduction v2.pdf");
+    expect(textOf(result)).toContain("Why Parallel Computing?");
+  });
+
+  it("refuses path combined with another source", async () => {
+    const { call } = setup({});
+
+    const result = await call({ courseId: COURSE, topicId: 7, path: "/content/enforced/x/a.pdf" });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/path cannot be combined/);
   });
 
   // Rendering loads the native canvas library and pdf.js on first use, which

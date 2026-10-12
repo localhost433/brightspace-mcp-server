@@ -401,3 +401,141 @@ describe("get_course_content module descriptions (#152)", () => {
     }
   );
 });
+
+/**
+ * Some tenants (NYU) answer /content/userprogress/ with 404. Every topic was
+ * then reported incomplete; completion now comes from each topic's own
+ * completions route, keeping only the signed-in user's row.
+ */
+describe("get_course_content completion fallback", () => {
+  const topic = (Id: number, Title: string) => ({
+    Id, Title, ShortTitle: null, Type: 1, TopicType: 1, Description: null,
+    IsHidden: false, IsLocked: false, DueDate: null, LastModifiedDate: null,
+  });
+  const module = {
+    Id: 50, Title: "Lectures", ShortTitle: null, Type: 0, Description: null,
+    ModuleStartDate: null, ModuleEndDate: null, ModuleDueDate: null,
+    IsHidden: false, IsLocked: false, LastModifiedDate: null,
+    Structure: [topic(1, "Intro"), topic(2, "Regression")],
+  };
+
+  function setupFallback(completionsFor: (topicId: number) => unknown) {
+    const requested: string[] = [];
+    const apiClient = {
+      le: (orgUnitId: number, p: string) => `/d2l/api/le/1.0/${orgUnitId}${p}`,
+      lp: (p: string) => `/d2l/api/lp/1.0${p}`,
+      get: vi.fn(async (path: string) => {
+        requested.push(path);
+        if (path.endsWith("/content/userprogress/")) throw Object.assign(new Error("nf"), { status: 404 });
+        if (path.endsWith("/users/whoami")) return { Identifier: "7" };
+        if (path.endsWith("/content/root/")) return [module];
+        if (path.endsWith("/structure/")) return module.Structure;
+        const m = /\/content\/topics\/(\d+)\/completions\/$/.exec(path);
+        if (m) return completionsFor(Number(m[1]));
+        return [];
+      }),
+    };
+    let handler: (args: unknown) => Promise<any>;
+    registerGetCourseContent(
+      { registerTool: (_n: string, _m: unknown, fn: any) => { handler = fn; } } as any,
+      apiClient as any
+    );
+    return { call: (args: unknown) => handler!(args), requested };
+  }
+
+  it("asks each topic's completions when userprogress is refused", async () => {
+    const { call } = setupFallback((id) => ({
+      Objects: id === 1 ? [{ UserId: 7, TopicId: 1, CompletionType: 2, CompletionDate: "2026-09-08T16:37:09.603Z" }] : [],
+      Next: null,
+    }));
+
+    const body = JSON.parse((await call({ courseId: COURSE_ID })).content[0].text);
+    const [intro, regression] = body.contentTree[0].children;
+
+    expect(intro).toMatchObject({ isCompleted: true, completedDate: "2026-09-08T16:37:09.603Z" });
+    expect(regression.isCompleted).toBe(false);
+    expect(body.contentTree[0].completion).toEqual({ completed: 1, total: 2 });
+    expect(body.completedTopicCount).toBe(1);
+    expect(body.completionSource).toBe("topicCompletions");
+  });
+
+  it("ignores other users' completion rows", async () => {
+    const { call } = setupFallback(() => ({
+      Objects: [{ UserId: 99, TopicId: 1, CompletionDate: "2026-09-01T00:00:00.000Z" }],
+      Next: null,
+    }));
+
+    const body = JSON.parse((await call({ courseId: COURSE_ID })).content[0].text);
+
+    expect(body.completedTopicCount).toBe(0);
+  });
+
+  it("says completion is unknown when every lookup is refused", async () => {
+    const { call } = setupFallback(() => {
+      throw Object.assign(new Error("forbidden"), { status: 403 });
+    });
+
+    const body = JSON.parse((await call({ courseId: COURSE_ID })).content[0].text);
+
+    expect(body.completionSource).toBe("unavailable");
+    expect(body.completionNote).toMatch(/unknown/);
+  });
+});
+
+describe("get_course_content assignment links", () => {
+  it("marks a dropbox quickLink as an assignment with its folderId", async () => {
+    const apiClient = {
+      le: (orgUnitId: number, p: string) => `/d2l/api/le/1.0/${orgUnitId}${p}`,
+      get: vi.fn(async (path: string) => {
+        if (path.endsWith("/content/root/")) {
+          return [{
+            Id: 13919006, Title: "Homework 0", ShortTitle: "", Type: 1, TopicType: 3, Description: null,
+            IsHidden: false, IsLocked: false, DueDate: null, LastModifiedDate: null,
+            Url: "/d2l/common/dialogs/quickLink/quickLink.d2l?ou=617102&type=dropbox&rCode=ABC-5885130",
+            ActivityId: "https://ids.brightspace.com/activities/dropbox/ABC-5885130",
+            ToolItemId: 1241225,
+          }];
+        }
+        return [];
+      }),
+    };
+    let handler: (args: unknown) => Promise<any>;
+    registerGetCourseContent({ registerTool: (_n: string, _m: unknown, fn: any) => { handler = fn; } } as any, apiClient as any);
+
+    const topic = JSON.parse((await handler!({ courseId: COURSE_ID })).content[0].text).contentTree[0];
+
+    expect(topic).toMatchObject({ topicType: "link", linksTo: "assignment", folderId: 1241225 });
+  });
+});
+
+describe("get_course_content linked files", () => {
+  it("lists course files linked from a module description, once each", async () => {
+    const html =
+      '<table><tr><td><a href="/content/enforced/617117-X/introduction.pdf">Why Parallel Computing?</a></td></tr>' +
+      '<tr><td><a href="/content/enforced/617117-X/hw-1.pdf">Parallel <strong>Hardware</strong></a></td>' +
+      '<td><a href="/content/enforced/617117-X/hw-1.pdf">Parallel Hardware</a> (cont&#39;d)</td></tr></table>' +
+      '<p><a href="https://cs.nyu.edu/home/index.html">Dept website</a></p>';
+    const apiClient = {
+      le: (orgUnitId: number, p: string) => `/d2l/api/le/1.0/${orgUnitId}${p}`,
+      get: vi.fn(async (path: string) => {
+        if (path.endsWith("/content/root/")) {
+          return [{
+            Id: 13778899, Title: "Lecture Slides & Reading Information", ShortTitle: null, Type: 0,
+            Description: { Text: "", Html: html }, ModuleStartDate: null, ModuleEndDate: null, ModuleDueDate: null,
+            IsHidden: false, IsLocked: false, LastModifiedDate: null, Structure: [],
+          }];
+        }
+        return [];
+      }),
+    };
+    let handler: (args: unknown) => Promise<any>;
+    registerGetCourseContent({ registerTool: (_n: string, _m: unknown, fn: any) => { handler = fn; } } as any, apiClient as any);
+
+    const module = JSON.parse((await handler!({ courseId: COURSE_ID })).content[0].text).contentTree[0];
+
+    expect(module.linkedFiles).toEqual([
+      { title: "Why Parallel Computing?", path: "/content/enforced/617117-X/introduction.pdf" },
+      { title: "Parallel Hardware", path: "/content/enforced/617117-X/hw-1.pdf" },
+    ]);
+  });
+});

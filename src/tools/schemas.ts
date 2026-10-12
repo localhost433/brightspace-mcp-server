@@ -92,6 +92,8 @@ export const DownloadFileSchema = z.object({
     .describe("Absolute path to the directory where the file should be saved on disk. Omit this to receive the file inline in the tool response instead — the right choice in clients like Claude Desktop, whose analysis/sandbox tools cannot see files an MCP server writes to its own host filesystem. Inline mode returns extracted text for PDFs and Office documents, an image block for jpeg/png/gif/webp, and a short description (pointing back to disk mode) for anything else, capped at 10MB and 400,000 characters of extracted text."),
   customFilename: z.string().max(255).optional()
     .describe("Custom filename for the downloaded file (include extension). If not provided, uses the original filename from Brightspace."),
+  path: z.string().min(1).max(2048).optional()
+    .describe("A course file linked from a page, as its /content/... path or full URL on this Brightspace (e.g. a lecture PDF in a module's description table, listed under linkedFiles by get_course_content). Use instead of topicId/folderId/newsId."),
   pages: z.string().max(100).optional()
     .describe("Inline PDFs only: page range to return, e.g. \"5\", \"10-20\", \"1,4-6\" or \"30-\". Omit for the whole document."),
   pageImages: z.boolean().optional()

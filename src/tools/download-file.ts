@@ -415,7 +415,7 @@ export function registerDownloadFile(
     {
       title: "Download File",
       description:
-        "Download a file from course content, instructor assignment attachments (source: assignmentAttachment with folderId + fileId), assignment submissions, or an announcement's attachments. Use this when the user wants a file from Brightspace course content, dropbox submissions, or an announcement (newsId + fileId, from get_announcements). Two response modes: (1) INLINE (default — omit downloadPath): the file comes back directly in the tool response — extracted text for PDFs and Office documents, an image block for jpeg/png/gif/webp, or a short description for anything else — so it can be read immediately without touching any filesystem. PDF text is marked by page, with incremental slide builds collapsed; pass pages to read part of a long PDF, and pageImages: true to see rendered slides when equations, diagrams or plots matter. This is the right choice in clients like Claude Desktop, whose analysis/sandbox tools cannot see a file the MCP server writes to its own host filesystem. (2) DISK (set downloadPath to an absolute path on the HOST filesystem the MCP server runs on): the file is saved there. Ask the user where to save it before using disk mode — never guess a directory. After identifying the file, suggest a clean readable filename (e.g., 'Lecture 7 - Memory Management.pdf' instead of 'L07_CS251_2026SP_v2.pdf') and pass it as customFilename, or omit it to keep the original. If a content-topic download fails because the file isn't released yet, the response explains why when Brightspace's module/topic metadata supports it (not yet open, ended, locked, or hidden).",
+        "Download a file from course content, a course file linked from a page by its /content/... path (path; e.g. lecture slides in a module description table, see linkedFiles in get_course_content), instructor assignment attachments (source: assignmentAttachment with folderId + fileId), assignment submissions, or an announcement's attachments. Use this when the user wants a file from Brightspace course content, dropbox submissions, or an announcement (newsId + fileId, from get_announcements). Two response modes: (1) INLINE (default — omit downloadPath): the file comes back directly in the tool response — extracted text for PDFs and Office documents, an image block for jpeg/png/gif/webp, or a short description for anything else — so it can be read immediately without touching any filesystem. PDF text is marked by page, with incremental slide builds collapsed; pass pages to read part of a long PDF, and pageImages: true to see rendered slides when equations, diagrams or plots matter. This is the right choice in clients like Claude Desktop, whose analysis/sandbox tools cannot see a file the MCP server writes to its own host filesystem. (2) DISK (set downloadPath to an absolute path on the HOST filesystem the MCP server runs on): the file is saved there. Ask the user where to save it before using disk mode — never guess a directory. After identifying the file, suggest a clean readable filename (e.g., 'Lecture 7 - Memory Management.pdf' instead of 'L07_CS251_2026SP_v2.pdf') and pass it as customFilename, or omit it to keep the original. If a content-topic download fails because the file isn't released yet, the response explains why when Brightspace's module/topic metadata supports it (not yet open, ended, locked, or hidden).",
       inputSchema: DownloadFileSchema,
     },
     async (args: any) => {
@@ -425,7 +425,7 @@ export function registerDownloadFile(
         // Parse and validate input
         const {
           courseId, topicId, folderId, newsId, fileId, downloadPath, customFilename, source,
-          pages, pageImages, collapseSlideBuilds,
+          pages, pageImages, collapseSlideBuilds, path: filePath,
         } = DownloadFileSchema.parse(args);
         const fileOptions: FileOptions = { customFilename, pages, pageImages, collapseSlideBuilds };
 
@@ -466,8 +466,12 @@ export function registerDownloadFile(
         }
 
         // Determine download source
-        if (topicId !== undefined) {
-
+        if (filePath !== undefined) {
+          if (topicId !== undefined || folderId !== undefined || newsId !== undefined || fileId !== undefined) {
+            return errorResponse("path cannot be combined with topicId, folderId, newsId or fileId.");
+          }
+          return await downloadLinkedCourseFile(apiClient, filePath, downloadPath, fileOptions);
+        } else if (topicId !== undefined) {
           // Content file download
           validateContentId(topicId);
           return await downloadContentFile(
@@ -503,7 +507,7 @@ export function registerDownloadFile(
           );
         } else {
           return errorResponse(
-            "Either topicId (for content files), both folderId and fileId (for submission files), or both newsId and fileId (for announcement attachments) must be provided"
+            "Either topicId (for content files), both folderId and fileId (for submission files), both newsId and fileId (for announcement attachments), or path (for a course file linked from a page) must be provided"
           );
         }
       } catch (error) {
@@ -511,6 +515,29 @@ export function registerDownloadFile(
       }
     }
   );
+}
+
+/**
+ * Download a course file that a page links to by path rather than by topic:
+ * the slides in a module description's lecture table, an image in an
+ * announcement. Brightspace serves these to browser sessions only, so the
+ * client fetches them with the session cookie.
+ */
+async function downloadLinkedCourseFile(
+  apiClient: D2LApiClient,
+  filePath: string,
+  downloadPath: string | undefined,
+  options: FileOptions = {}
+): Promise<CallToolResult> {
+  const response = await apiClient.getCourseFile(filePath);
+  const lastSegment = filePath.split("?")[0].split("/").filter(Boolean).pop() ?? "file";
+  let originalFilename: string;
+  try {
+    originalFilename = decodeURIComponent(lastSegment);
+  } catch {
+    originalFilename = lastSegment;
+  }
+  return finishDownload(response, originalFilename, downloadPath, options, "Linked course file");
 }
 
 /** Download an instructor-provided handout, independently of student submissions. */

@@ -382,6 +382,40 @@ export class D2LApiClient {
     }
   }
 
+  /**
+   * Fetch a course file linked from HTML (a lecture table's
+   * `/content/enforced/<course>/slides.pdf`) as the signed-in user. Those
+   * paths are served to browser sessions: a Bearer token is redirected to the
+   * login page, so this sends the stored session cookie. Only `/content/`
+   * paths on this Brightspace are accepted, and like getPage it never starts
+   * a login: an expired cookie is reported as a 401.
+   */
+  async getCourseFile(pathOrUrl: string): Promise<Response> {
+    let path = pathOrUrl.trim();
+    if (/^https?:\/\//i.test(path)) {
+      try {
+        const url = new URL(path);
+        path = url.origin === this.origin ? `${url.pathname}${url.search}` : "";
+      } catch {
+        path = "";
+      }
+    }
+    const normalized = path ? new URL(path, this.baseUrl).pathname : "";
+    if (!this.isSameOriginPath(path) || !path.startsWith("/content/") || !normalized.startsWith("/content/")) {
+      throw new Error(
+        "Not a course file path. Pass a /content/... path (or its full URL on this Brightspace) as it appears in a link."
+      );
+    }
+    const token = await this.tokenManager.getToken();
+    if (!token?.cookieHeader) {
+      throw new Error(
+        "Course files linked from pages need a browser sign-in session, and none is stored (an access-token or pasted-cookie setup has none). Sign in through the browser flow, or open the link in Brightspace."
+      );
+    }
+    const cookieToken: TokenData = { ...token, accessToken: `cookie:${token.cookieHeader}` };
+    return this.retrying(() => this.throttled(() => this.makeRawRequest(path, cookieToken)));
+  }
+
   /** True when `path` is a root-relative path that keeps a request on the configured origin. */
   private isSameOriginPath(path: string): boolean {
     if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\")) return false;
@@ -598,6 +632,12 @@ export class D2LApiClient {
       // Preserve cookie material for the shared HTTP refresh path.
       if (response.status === 401) {
         throw new ApiError(401, path, "Brightspace rejected the access token.");
+      }
+
+      // fetch follows a 302 to the login form, which arrives as an ordinary
+      // HTML page rather than the session-expired stub checked below.
+      if (response.redirected && /\/d2l\/login/i.test(response.url)) {
+        throw new ApiError(401, path, `Session expired. Please re-authenticate via ${AUTH_COMMAND}.`);
       }
 
       // Handle 429 rate limiting

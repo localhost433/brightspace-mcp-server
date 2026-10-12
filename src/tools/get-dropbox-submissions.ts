@@ -13,6 +13,7 @@ import { D2LApiClient, ApiError, DEFAULT_CACHE_TTLS } from "../api/index.js";
 import { GetDropboxSubmissionsSchema } from "./schemas.js";
 import { toolResponse, sanitizeError, errorResponse } from "./tool-helpers.js";
 import { log } from "../utils/logger.js";
+import { mapWithConcurrency } from "../utils/concurrency.js";
 
 // D2L submission API types (instructor/TA view — every submitter, not just "mine")
 interface D2LSubmissionFile {
@@ -45,24 +46,6 @@ interface D2LDropboxFolder {
 // Per-submitter feedback lookup is one GET each; cap how many run at once so
 // a large dropbox folder can't fan out hundreds of concurrent requests.
 const FEEDBACK_FETCH_CONCURRENCY = 8;
-
-/** Run `fn` over `items`, at most `concurrency` in flight at a time. */
-async function mapWithConcurrency<T>(
-  items: T[],
-  concurrency: number,
-  fn: (item: T) => Promise<void>
-): Promise<void> {
-  let next = 0;
-  async function worker(): Promise<void> {
-    while (next < items.length) {
-      const item = items[next++];
-      await fn(item);
-    }
-  }
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, items.length) }, worker)
-  );
-}
 
 /**
  * Register get_dropbox_submissions tool.

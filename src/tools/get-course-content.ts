@@ -11,6 +11,8 @@ import { toolResponse, sanitizeError } from "./tool-helpers.js";
 import { convertHtmlToMarkdown } from "../utils/html-converter.js";
 import { matchesModifiedSince } from "../utils/modified-since.js";
 import { log } from "../utils/logger.js";
+import { decodeXmlEntities } from "../utils/xml-lite.js";
+import { fetchTopicCompletions, type TopicCompletion } from "./content-completion.js";
 import { contentAvailability, type ContentAvailability } from "./content-availability.js";
 
 // D2L Content API response type
@@ -36,6 +38,45 @@ export interface ContentObject {
   StartDate?: string | null;
   EndDate?: string | null;
   DueDate?: string | null;
+  /** e.g. "https://ids.brightspace.com/activities/dropbox/<tenant>-<id>" for an assignment link. */
+  ActivityId?: string | null;
+  ToolItemId?: number | null;
+  GradeItemId?: number | null;
+}
+
+/**
+ * Course files an HTML description links to by path (a lecture table's
+ * `/content/enforced/<course>/slides.pdf`), once each in order of first
+ * appearance. download_file takes these as `path`.
+ */
+export function linkedCourseFiles(html: string | null | undefined): Array<{ title: string; path: string }> {
+  const files = new Map<string, string>();
+  for (const m of (html ?? "").matchAll(/<a\b[^>]*?\bhref\s*=\s*(["'])([^"']+)\1[^>]*>([\s\S]*?)<\/a>/gi)) {
+    const href = decodeXmlEntities(m[2]).trim();
+    if (!href.startsWith("/content/") || files.has(href)) continue;
+    const title = decodeXmlEntities(m[3].replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim();
+    files.set(href, title || href.split("/").pop() || href);
+  }
+  return [...files].map(([path, title]) => ({ title, path }));
+}
+
+/** `{ linkedFiles }` when the HTML links to course files, else nothing (absence = none). */
+function linkedFilesField(html: string | null | undefined): { linkedFiles?: Array<{ title: string; path: string }> } {
+  const files = linkedCourseFiles(html);
+  return files.length > 0 ? { linkedFiles: files } : {};
+}
+
+/**
+ * The Brightspace tool a link topic opens, read from its ActivityId (or the
+ * quickLink URL's type). An assignment link's ToolItemId is the dropbox
+ * folder id the assignment tools take.
+ */
+function linkedActivity(item: ContentObject): { kind: "assignment" | "quiz" | "discussion"; idField: string } | null {
+  const source = `${item.ActivityId ?? ""} ${item.Url ?? ""}`;
+  if (/activities\/dropbox\/|[?&]type=dropbox\b/i.test(source)) return { kind: "assignment", idField: "folderId" };
+  if (/activities\/quiz|[?&]type=quiz\b/i.test(source)) return { kind: "quiz", idField: "quizId" };
+  if (/activities\/discuss|[?&]type=discuss/i.test(source)) return { kind: "discussion", idField: "discussionTopicId" };
+  return null;
 }
 
 // Progress tracking
@@ -191,6 +232,7 @@ export async function buildContentTree(
           ...(item.IsLocked ? { isLocked: item.IsLocked } : {}),
           ...availabilityFields(availability),
           lastModified: item.LastModifiedDate ?? null,
+          ...linkedFilesField(item.Description?.Html),
           children: processedChildren,
         });
       }
@@ -227,11 +269,19 @@ export async function buildContentTree(
       } else if (item.TopicType === 2 || item.TopicType === 3) {
         // Link topic — include URL
         topic.url = item.Url ?? null;
+        // A link into a Brightspace tool says which one, with the id the
+        // matching tools take (folderId for get_assignment_files and friends).
+        const activity = linkedActivity(item);
+        if (activity) {
+          topic.linksTo = activity.kind;
+          if (typeof item.ToolItemId === "number") topic[activity.idField] = item.ToolItemId;
+        }
       }
 
       // HTML content — include body converted to markdown
       if (item.Description?.Html) {
         topic.content = convertHtmlToMarkdown(item.Description.Html).markdown;
+        Object.assign(topic, linkedFilesField(item.Description.Html));
       }
 
       tree.push(topic);
@@ -265,6 +315,43 @@ function filterTreeByModifiedSince(tree: any[], cutoff: Date): any[] {
     }
   }
   return result;
+}
+
+/** Every topic id in a built tree, in order. */
+export function collectTopicIds(tree: any[]): number[] {
+  const ids: number[] = [];
+  for (const item of tree) {
+    if (item.type === 'topic') ids.push(item.id);
+    else if (item.type === 'module') ids.push(...collectTopicIds(item.children ?? []));
+  }
+  return ids;
+}
+
+/**
+ * Mark each topic's completion and give each module a completed/total count
+ * of the topics beneath it. Returns the totals for the whole tree.
+ */
+export function applyCompletions(
+  tree: any[],
+  completions: Map<number, TopicCompletion>
+): { completed: number; total: number } {
+  let completed = 0;
+  let total = 0;
+  for (const item of tree) {
+    if (item.type === 'topic') {
+      const c = completions.get(item.id);
+      item.isCompleted = c?.completed ?? false;
+      if (c?.completedDate) item.completedDate = c.completedDate;
+      total++;
+      if (item.isCompleted) completed++;
+    } else if (item.type === 'module') {
+      const sub = applyCompletions(item.children ?? [], completions);
+      if (sub.total > 0) item.completion = sub;
+      completed += sub.completed;
+      total += sub.total;
+    }
+  }
+  return { completed, total };
 }
 
 /**
@@ -311,7 +398,7 @@ export function registerGetCourseContent(
       title: "Get Course Content",
       annotations: { readOnlyHint: true },
       description:
-        "Fetch the content tree for a course showing modules, topics, files, and links. Use this when the user asks about course materials, lecture slides, uploaded files, content structure, or what's in a course module. Use moduleTitle to filter to a specific module (e.g. 'Labs', 'Staff', 'Homeworks') instead of fetching the entire tree. Use maxDepth to limit recursion depth for a table-of-contents view. A module or topic that isn't currently available carries isAvailable/availabilityStatus/availabilityMessage (and startDate/endDate when known) explaining why; absence of these fields means it's available now.",
+        "Fetch the content tree for a course showing modules, topics, files, and links. Use this when the user asks about course materials, lecture slides, uploaded files, content structure, or what's in a course module. Use moduleTitle to filter to a specific module (e.g. 'Labs', 'Staff', 'Homeworks') instead of fetching the entire tree. Use maxDepth to limit recursion depth for a table-of-contents view. A module or topic that isn't currently available carries isAvailable/availabilityStatus/availabilityMessage (and startDate/endDate when known) explaining why; absence of these fields means it's available now. A link topic that opens an assignment, quiz or discussion carries linksTo plus its id (folderId for assignments, usable with get_assignment_files and download_file). A module or topic whose description links to course files (e.g. a lecture schedule table linking slide PDFs) lists them under linkedFiles; pass a linkedFiles path to download_file as path to read one. Each topic's isCompleted reflects your own completion; modules carry a completion {completed, total} count.",
       inputSchema: GetCourseContentSchema,
     },
     async (args: any) => {
@@ -332,32 +419,13 @@ export function registerGetCourseContent(
           );
         }
 
-        // Fetch user progress for the course (graceful degradation)
-        let progressArray: ContentProgress[] = [];
-        try {
-          progressArray = await apiClient.get<ContentProgress[]>(
-            apiClient.le(courseId, '/content/userprogress/'),
-            { ttl: DEFAULT_CACHE_TTLS.courseContent }
-          );
-        } catch (error: any) {
-          // 404/403 means no progress data available - not an error
-          if (error?.status !== 404 && error?.status !== 403) {
-            log('DEBUG', `Failed to fetch progress for course ${courseId}`, error);
-          }
-        }
-
-        // Build progress map for O(1) lookups
-        const progressMap = new Map<number, ContentProgress>();
-        for (const p of progressArray) {
-          progressMap.set(p.ContentObjectId, p);
-        }
-
-        // Recursively build content tree
+        // Build the tree first; completion is looked up afterwards for just
+        // the topics it ended up containing.
         let contentTree = await buildContentTree(
           apiClient,
           courseId,
           rootModules,
-          progressMap,
+          new Map(),
           typeFilter,
           maxDepth
         );
@@ -373,6 +441,13 @@ export function registerGetCourseContent(
           filteredOut = topicCountBeforeFilter - countTopics(contentTree);
         }
 
+        const { completions, source: completionSource } = await fetchTopicCompletions(
+          apiClient,
+          courseId,
+          collectTopicIds(contentTree)
+        );
+        const completion = applyCompletions(contentTree, completions);
+
         const topicCount = countTopics(contentTree);
         const moduleCount = countModules(contentTree);
 
@@ -384,6 +459,11 @@ export function registerGetCourseContent(
           contentTree,
           topicCount,
           moduleCount,
+          completedTopicCount: completion.completed,
+          completionSource,
+          ...(completionSource === "unavailable"
+            ? { completionNote: "Brightspace refused every completion lookup for this course, so isCompleted is unknown (reported as false), not a measurement." }
+            : {}),
           ...(modifiedSince ? { modifiedSince, returned: topicCount, filteredOut } : {}),
         });
       } catch (error) {
