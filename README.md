@@ -33,7 +33,7 @@ Works with Claude Desktop, Claude Code, Cursor, ChatGPT Desktop, Windsurf, and a
    ```bash
    npx -y brightspace-mcp-server@latest setup
    ```
-   It asks for your school's Brightspace address, your username and password, and how you normally do two-factor sign-in (phone approval, authenticator code, or a browser window). Your password goes into your computer's own password store (Keychain on Mac, Credential Manager on Windows), never into a file. At the end it connects itself to Claude Desktop, Cursor, Antigravity, Codex, or Claude Code if you have them. If one of them already has a `brightspace` entry pointing somewhere else (an old local build, a fork), setup shows you that entry and asks before replacing it.
+   It asks for your school's Brightspace address, your username and password, and how you confirm it's you when you sign in (a phone app, or another way like a text message). Your password goes into your computer's own password store (Keychain on Mac, Credential Manager on Windows), never into a file. Before signing you in, it connects itself to Claude Desktop, Cursor, Antigravity, Codex, or Claude Code if you have them. If one of them already has a `brightspace` entry pointing somewhere else (an old local build, a fork), setup shows you that entry and asks before replacing it.
 
    **On a Mac:** when Keychain asks whether `node` may use the saved Brightspace password, choose **Always Allow**, not just Allow. That lets later sign-ins (the `auth` command and questions from your AI app) read it without asking again.
 3. **Restart your AI app and ask it something** — the first question signs you in. If your phone asks you to approve a sign-in, approve it and ask again.
@@ -47,6 +47,8 @@ Install brightspace-mcp-server for me by following
 https://github.com/RohanMuppa/brightspace-mcp-server/blob/main/LLMs.md
 (use --purdue at Purdue, --suny at SUNY, --tudelft at TU Delft, --cuny at CUNY, --leiden at Leiden, --mcgill at McGill, --ngeeann at Ngee Ann Polytechnic, or --javeriana at Javeriana Cali).
 ```
+
+The AI does everything it can by itself: it checks your computer, downloads the browser sign-in uses, and connects your AI apps. Then it gives you one command to run in a terminal. That command asks for your password and waits for you to approve the sign-in on your phone. That's the only part that needs you. Afterwards the AI checks that it can see your courses.
 
 Using a different AI app? Add the command `npx -y brightspace-mcp-server@latest` to its MCP settings (on Windows: `cmd /c npx -y brightspace-mcp-server@latest`). Exact steps for each app: [docs/troubleshooting.md](docs/troubleshooting.md).
 
@@ -65,7 +67,7 @@ If your school uses D2L Brightspace, yes. These have automatic sign-in built in:
 | McGill University | Microsoft Entra | `--mcgill` |
 | Javeriana Cali | OneGate (password + authenticator code) | `--javeriana` |
 | Ngee Ann Polytechnic | Microsoft Entra | `--ngeeann` |
-| Any other D2L school | Paste your Brightspace address; if the login page isn't recognized, a browser window opens so you can sign in by hand | none |
+| Any other D2L school | Paste your Brightspace address. If the login page isn't recognized, pick option 2 at setup's sign-in question so the page opens for you to finish by hand | none |
 
 School-specific quirks: [docs/sign-in.md](docs/sign-in.md#per-school-notes).
 
@@ -73,10 +75,10 @@ School-specific quirks: [docs/sign-in.md](docs/sign-in.md#per-school-notes).
 
 | About | Try |
 |-------|-----|
-| Grades | "Am I passing all my classes?" · "Compare my grades across courses" · "Is there feedback on my midterm?" (quiz-scored grades link to the quiz, since quiz feedback, including feedback only viewable in LockDown Browser, isn't readable through the API) |
+| Grades | "Am I passing all my classes?" · "Compare my grades across courses" · "What did my professor say about Mini-Assignment 1?" (own assignment feedback is read from every route Brightspace documents for students) · "Is there feedback on my midterm?" (quiz-scored grades link to the quiz, since quiz feedback, including feedback only viewable in LockDown Browser, isn't readable through the API) |
 | Due dates | "What's due in the next 48 hours?" · "Build me a study schedule for the week" |
 | Assignments and rubrics | "What does the lab 4 spec actually ask for?" · "Why did I lose points on the analysis criterion?" |
-| Quizzes and exams | "Which quizzes close this week?" · "Is there a midterm in the gradebook that isn't on my assignments list?" |
+| Quizzes and exams | "Which quizzes close this week?" · "Is there a midterm in the gradebook that isn't on my assignments list?" (quizzes are collected from the quiz list, the course content, and the gradebook, so a closed quiz or one the list leaves out still shows up; each course says whether its quiz sources all answered, and if Brightspace refused one it's marked incomplete rather than passed off as everything; "complete" means every source answered, not that every quiz is guaranteed to be listed. A gradebook column linked to a quiz the list omits now shows up as a quiz with its dates and attempts instead of a bare grade-only row when the quiz can be read. Gradebook-only rows now also appear on tenants that send only the documented `GradeType` on grade columns; hidden grade columns, hidden assignments and inactive quizzes never produce one. Content quizzes beyond the first 30 per course are listed from the course content alone and the course is marked incomplete. Quiz rows may also say whether they are open, closed, or not yet open, and mark a quiz whose details Brightspace would not return; gradebook lookups for unlisted quizzes are capped at 20 per course, or 5 when the course's quiz tool can't be identified) |
 | Announcements | "Did any professor post something important today?" · "Read the file attached to today's announcement" |
 | Course content | "Find the midterm review slides" · "Download every PDF from Module 5" · "Search this course for office hours" · or just read a file inline instead of saving it |
 | Syllabus | "What's the late policy in ECE 264's syllabus?" (if the course keeps its syllabus in an external tool such as Simple Syllabus, you get the link to open instead) |
@@ -84,7 +86,7 @@ School-specific quirks: [docs/sign-in.md](docs/sign-in.md#per-school-notes).
 | Discussions | "Summarize the latest posts in the final project thread" |
 | Lecture videos | "What did the professor say about pinch-off in Tuesday's recording?" (Kaltura, including BoilerCast LTI links, and YouTube) |
 | Calendar | "When is my midterm?" · "Is lab cancelled on Thursday?" |
-| For instructors and TAs | "Which students haven't submitted Lab 4 yet?" · "What feedback did I leave on this student's homework?" · "Download that student's submitted PDF" (students see a clear "instructor access required" note) |
+| For instructors and TAs | "Which students haven't submitted Lab 4 yet?" · "What feedback did I leave on this student's homework?" · "Download that student's submitted PDF" (students get a clear "instructor access required" note for these, but can read their own released feedback, below) |
 | Signing out | "Sign me out of Brightspace" (your AI app may ask you to confirm first; details under [When it asks you to sign in](#when-it-asks-you-to-sign-in)) |
 
 ## Prompts
@@ -104,14 +106,14 @@ All optional, set in your AI app's MCP `env` config or your shell. The full list
 
 | Setting | What it does |
 |---------|--------------|
-| `D2L_REMEMBER_MFA=true` | Tick Microsoft's "Don't ask again" box so later sign-ins skip the second factor (off by default; not for shared computers). `setup` asks this and saves it as `rememberMfa` in `config.json`; the env var overrides it |
-| `D2L_PASSWORDLESS=true` | Sign in with Microsoft Entra's passwordless phone approval, so no password is saved on the computer (off by default; Entra schools only). Every sign-in, including automatic ones, then waits for you to approve on your phone, so it suits interactive use, not unattended or scheduled jobs. `setup` asks this and saves it as `passwordless` in `config.json`; the env var overrides it ([details](docs/sign-in.md#passwordless-sign-in)) |
-| `D2L_TOTP_SECRET` | An authenticator setup key, so a Microsoft Entra "enter a code" challenge is answered on this computer instead of on your phone (off by default). Prefer `setup`, which keeps the key in your OS keychain; this variable is for CI and containers with no keychain and is weaker, because anything that can read the process environment gets your second factor ([details](docs/sign-in.md#answering-code-challenges-without-your-phone)) |
+| `D2L_REMEMBER_MFA=true` | Tick Microsoft's "Don't ask again" box so later sign-ins skip the second factor (off by default; not for shared computers). `setup` asks this as option 2 of its one "how often do you want to approve sign-ins" question and saves it as `rememberMfa` in `config.json`; the env var overrides it ([details](docs/sign-in.md#fewer-2fa-prompts)) |
+| `D2L_TOTP_SECRET` | An authenticator setup key, so a Microsoft Entra "enter a code" challenge is answered on this computer instead of on your phone (off by default). Prefer `setup` (option 3), which keeps the key in your OS keychain; this variable is for CI and containers with no keychain and is weaker, because anything that can read the process environment gets your second factor ([details](docs/sign-in.md#fewer-2fa-prompts)) |
 | `D2L_HEADLESS=false` | Show the browser window during sign-in, for MFA methods that need a click |
 | `D2L_DUO_PASSCODE=1` | On Duo, type a passcode instead of waiting for a push |
 | `D2L_SESSION_COOKIE` / `D2L_ACCESS_TOKEN` | Skip the browser entirely with a pasted cookie or token ([how](docs/sign-in.md#no-browser-paste-a-session-cookie-or-token)) |
 | `D2L_INCLUDE_COURSES` / `D2L_EXCLUDE_COURSES` | Limit which courses the AI sees, by course id |
 | `D2L_ACTIVE_ONLY=false` | Include courses whose enrollment has ended |
+| `D2L_CURRENT_ONLY=true` | Only show courses in their current enrollment window, like Brightspace's "Current Courses" widget |
 | `D2L_NO_UPDATE_CHECK=1` | Turn off the new-version notice |
 | `D2L_DEV_MODE=true` | Write a local, content-free log of tool calls and sign-in events, for debugging session problems ([how](docs/dev-mode.md)) |
 
@@ -125,13 +127,7 @@ npx -y brightspace-mcp-server@latest auth
 
 **On a Mac,** sign-in first reads your saved password from Keychain. If you picked a one-time **Allow** at the Keychain prompt, a later sign-in from your AI app or another terminal can fail or hang waiting for an approval nobody sees; pick **Always Allow** instead. That permission only lets the local Brightspace server read its own saved sign-in password, nothing else in your Keychain.
 
-**If your school asks for a 6-digit code** rather than a phone approval, `setup` can save the
-authenticator **setup key** (not a code) you got when you enrolled the app. From then on automatic
-sign-ins generate the code on this computer and finish without you, which is what unattended and
-scheduled use needs. It is optional and off unless you paste a key. The tradeoff is real: the key
-sits beside your password, so on **this** computer your two factors become one. It still stops
-anyone who only has your password, and it changes nothing for your other devices. Full enrollment
-steps: [docs/sign-in.md](docs/sign-in.md#answering-code-challenges-without-your-phone).
+**Want fewer 2FA prompts?** `setup` asks one question, "How often do you want to approve sign-ins on your phone?": **1** every time (default), **2** remember this computer, or **3** let this computer answer Microsoft's code requests itself (needs an authenticator setup key). Options 2 and 3 are opt-in and not for shared computers; to turn them off, rerun `setup` and pick 1. The tradeoffs and the steps for getting the key are in [docs/sign-in.md](docs/sign-in.md#fewer-2fa-prompts).
 
 **To sign out early** (on a shared computer, say), just ask your AI app to sign you out of Brightspace, or run `npx -y brightspace-mcp-server@latest auth --logout` in a terminal. It deletes this computer's saved Brightspace session, so the next question does a full sign-in. Your saved password, authenticator key, and settings are kept, so with a saved authenticator key that sign-in can finish without you; on a shared computer, also delete the saved `brightspace-mcp-server` entries from your computer's password store (Keychain Access on a Mac, Credential Manager on Windows). Other AI apps open on this computer are signed out too and will ask you to sign in on their next question. (An app you opened before updating may keep answering for up to an hour; quit and reopen it to sign it out right away.) It only clears this computer; it does not sign you out of Microsoft or Brightspace anywhere else. If a sign-in is in progress, it refuses and deletes nothing.
 
@@ -139,7 +135,7 @@ How often you're asked is up to your school, not this tool. Everything else abou
 
 ## Something not working?
 
-- Run `npx -y brightspace-mcp-server@latest doctor` first — it checks your Node version, saved setup, credential store, Brightspace connectivity, saved sign-in, and installed version, and tells you exactly what to fix.
+- Run `npx -y brightspace-mcp-server@latest doctor` first — it checks your Node version, the sign-in browser, saved setup, credential store, Brightspace connectivity, saved sign-in, and installed version, and tells you exactly what to fix.
 - **`Authentication failed: The native credential store is locked or unavailable.`** Your password store is locked or hasn't let this server read the saved password. Unlock it (on a Mac, log in or unlock Keychain Access), then run `npx -y brightspace-mcp-server@latest auth` again, or `setup` if that still fails, and choose **Always Allow** when Keychain asks.
 - **It works in the terminal but not in the app:** the app starts it separately and may not see your password store yet — see [docs/troubleshooting.md](docs/troubleshooting.md).
 - **Which version do I have?** Ask your AI "which version of the Brightspace server am I running?"

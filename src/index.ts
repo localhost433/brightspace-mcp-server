@@ -12,6 +12,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { enableStdoutGuard, log } from "./utils/logger.js";
 import { guardServerProcess } from "./utils/process-guard.js";
 import { loadConfig } from "./utils/config.js";
+import { setActiveShortcuts } from "./utils/two-factor-shortcuts.js";
 import { TokenManager, AuthRunner } from "./auth/index.js";
 import { D2LApiClient } from "./api/index.js";
 import { startUpdateChecks } from "./utils/update-checker.js";
@@ -47,6 +48,7 @@ import {
   registerGetDropboxFeedback,
   registerGetRubricsForObject,
   registerDownloadDropboxSubmissionFile,
+  acceptOmittedArguments,
   relayMfaChallenges,
   currentMfaAnnouncer,
 } from "./tools/index.js";
@@ -93,6 +95,9 @@ if (subcommand === 'setup') {
       // Load configuration
       const config = await loadConfig();
       configureDevActivity(config.sessionDir);
+      // Lets the MFA approval message mention the setup options only to users
+      // who have neither turned on. Booleans only; the key is never passed.
+      setActiveShortcuts({ rememberMfa: config.rememberMfa === true, keySaved: Boolean(config.totpUri) });
       log("DEBUG", "Configuration loaded", { sessionDir: config.sessionDir });
 
       // Create MCP server instance
@@ -167,6 +172,10 @@ if (subcommand === 'setup') {
           activeOnly: config.courseFilter.activeOnly,
         });
       }
+
+      // A client may leave `arguments` off a call to a tool that takes none;
+      // SDK 1.26-1.31 reject that. Must run before the first registration.
+      acceptOmittedArguments(server);
 
       // Register MCP tools. Each one, when its client sends a progress token,
       // shows an MFA challenge mid-call and waits for the approval instead of

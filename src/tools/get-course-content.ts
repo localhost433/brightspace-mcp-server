@@ -13,6 +13,7 @@ import { matchesModifiedSince } from "../utils/modified-since.js";
 import { log } from "../utils/logger.js";
 import { decodeXmlEntities } from "../utils/xml-lite.js";
 import { fetchTopicCompletions, type TopicCompletion } from "./content-completion.js";
+import { extractCourseFilePaths } from "../utils/course-files.js";
 import { contentAvailability, type ContentAvailability } from "./content-availability.js";
 
 // D2L Content API response type
@@ -220,6 +221,7 @@ export async function buildContentTree(
 
       // Only include module if it has matching children (or filter is 'all')
       if (typeFilter === 'all' || processedChildren.length > 0) {
+        const courseFiles = item.Description?.Html ? extractCourseFilePaths(item.Description.Html, courseId, apiClient.origin) : [];
         tree.push({
           type: 'module',
           id: item.Id,
@@ -227,6 +229,7 @@ export async function buildContentTree(
           description: item.Description?.Html?.trim()
             ? convertHtmlToMarkdown(item.Description.Html).markdown
             : item.Description?.Text ?? null,
+          ...(courseFiles.length > 0 ? { courseFiles } : {}),
           ...(item.ModuleDueDate ? { dueDate: item.ModuleDueDate } : {}),
           ...(item.IsHidden ? { isHidden: item.IsHidden } : {}),
           ...(item.IsLocked ? { isLocked: item.IsLocked } : {}),

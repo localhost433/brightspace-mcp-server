@@ -14,84 +14,80 @@ Distributed on npm as `brightspace-mcp-server`. Register it as `npx -y brightspa
 
 ## Installing it for a user
 
-Follow these steps in order. Stop and report back if any step fails.
+Installing takes three stages: you do everything you can, the person signs in, then you check it worked (issue #258). Only stage 2 needs the person. Stop and report back if a stage fails.
 
-### 1. Verify Node.js 20+ and native secure storage
+### 1. Prepare everything yourself (no prompts)
 
-```bash
-node --version
-```
-
-If Node is missing or below v20, tell the user to install the LTS from https://nodejs.org/ and stop. Require macOS Keychain, Windows Credential Manager, or an unlocked Linux Secret Service with `secret-tool` (`libsecret-tools` on Debian/Ubuntu). Linux uses libsecret directly; secrets pass through stdin, and temporary kernel-key storage is never used. v2 has no plaintext credential fallback.
-
-### 2. Run the setup wizard
+Check `node --version` first. If Node is missing or below v20, tell the user to install the LTS from https://nodejs.org/ and stop. Then ask the user, in chat, which school they're at and the username they sign in with. Don't ask for their password; only stage 2 takes it, typed by them.
 
 ```bash
-npx -y brightspace-mcp-server@latest setup
+npx -y brightspace-mcp-server@latest setup --purdue --prepare --username <their username> --json
 ```
 
-If the user is at Purdue, use the preset:
+How to run it:
+
+- **School:** use the school's flag: `--purdue`, `--suny`, `--western`, `--tudelft`, `--cuny`, `--leiden`, `--mcgill`, `--ngeeann` or `--javeriana`. For any other school, use `--url <their Brightspace address>` instead.
+- **SUNY campus:** add `--campus "<campus>"` if you know it. Otherwise stage 2 asks.
+- **Timeout:** allow several minutes. A first run can download Chromium (about 200 MB).
+
+What it does, all without a prompt:
+- checks Node, the native credential store, Chromium (downloading it when missing, unless `--no-browser-install`) and that the school is reachable;
+- saves the public settings to `~/.brightspace-mcp/config.json`, with no password. It only saves once the school is reachable, so a mistyped `--url` can't replace a working setup, and it leaves alone a config that still holds an older version's password;
+- registers the server in every AI app it finds: Claude Desktop, Cursor and Antigravity by editing their config files, and Codex and Claude Code through their own CLIs, at user scope.
+  - An existing `brightspace` entry that runs something else is left alone and reported. Pass `--replace` to change it.
+
+Running it again changes nothing that is already right.
+
+With `--json`, stdout is one JSON object. Progress lines go to stderr.
+- `state`:
+  - `ready_for_sign_in` (exit 0): go to stage 2.
+  - `signed_in` (exit 0): a saved sign-in already works; skip to stage 3.
+  - `needs_input` (exit 1): no school was given.
+  - `blocked` (exit 1): fix each step whose `ok` is false, then rerun.
+- `steps[]`: `{id, ok, blocking, line}`.
+- `apps[]`: one `outcome` per app: `added`, `current`, `replaced`, `different_left` or `failed`.
+- `restart[]`: the apps that need restarting to load the server.
+- `next`: `{command, needsHuman, instructions}`.
+
+For any other client (Windsurf, Copilot, Zed, Continue, etc.), register `npx -y brightspace-mcp-server@latest` yourself. On Windows that is `cmd /c npx -y brightspace-mcp-server@latest`. Config formats and paths differ per client and change over time, so check the client's current docs rather than guessing.
+
+### 2. Hand the sign-in to the person
+
+`next.command` is the person's step, for example:
 
 ```bash
-npx -y brightspace-mcp-server@latest setup --purdue
+npx -y brightspace-mcp-server@latest setup --purdue --sign-in
 ```
 
-If the user is at a SUNY campus, use the SUNY preset. It also asks which campus
-they attend, which lets sign-in skip SUNY's shared campus picker:
+It uses what stage 1 saved and asks only what needs them:
+- their username or SUNY campus, if you didn't pass them;
+- their password, or whether to keep one already saved;
+- how they confirm sign-in:
+  - 1: a phone app, either an approval or a code typed in the terminal. Chromium stays hidden.
+  - 2: another way, such as a text message. This saves `headless: false`, and the sign-in page opens for them to finish. Automatic re-auth later stays hidden either way.
+- how often to approve.
+
+Then it signs in and prints `Setup complete!`. If sign-in doesn't finish, it exits 1 and prints the same command to run again. Rerunning is always safe.
+
+It needs a terminal: without one it exits 2 rather than waiting for typing. So never run it in your own background shell; hand it over like this:
+
+- **Run it where the user can type.** That means a visible terminal they control: a terminal tab or panel your app shows them, or one they open themselves (Terminal on macOS, PowerShell on Windows).
+- **Say exactly where it is and what to do first.** Name the place the way they see it ("the terminal panel on the right, titled *brightspace setup*"), and link it if your app supports that. Tell them to click inside it before typing, because keystrokes go to the chat box until they do. Tell them to press Enter after each answer.
+- **Warn them about the password prompt.** Only asterisks appear as they type, and they still press Enter. Then it asks how they confirm sign-in and waits for the approval on their phone.
+- **Don't take "done" on faith.** Read the terminal yourself if you can. It is finished only when it prints `Setup complete!`. If it is still on a prompt, tell the user which question it is waiting on and where to answer it. Don't just ask again whether they are done. Don't offer a one-click "I'm done" reply: a beginner will click it before they have typed anything.
+- **If typing in your panel doesn't work,** give them the one command to paste into their own terminal app, and say how to open that app.
+
+The interactive wizard, `setup --purdue` with no mode flag, still works for a person setting up alone. It asks everything, registers apps before asking "Sign in now?", and also needs a terminal.
+
+### 3. Verify
 
 ```bash
-npx -y brightspace-mcp-server@latest setup --suny
+npx -y brightspace-mcp-server@latest doctor --json
 ```
 
-If the user is at a CUNY campus, use the CUNY preset. Their username is the
-full CUNY Login address, and sign-in asks in the terminal for the code from
-their authenticator app. CUNY requires that code on every full sign-in, so
-when the Brightspace session ends the user reruns `auth` in a terminal:
+`allOk: true` means the setup, the saved sign-in and one real course-list request all worked. Each failed check's `line` names its fix.
 
-```bash
-npx -y brightspace-mcp-server@latest setup --cuny
-```
-
-If the user is at McGill University, use the McGill preset. Sign-in goes
-through myCourses' SAML redirect straight to Microsoft Entra:
-
-```bash
-npx -y brightspace-mcp-server@latest setup --mcgill
-```
-
-If the user is at Pontificia Universidad Javeriana Cali, use the Javeriana
-preset. Sign-in goes through MobilityGuard OneGate, which asks in the
-terminal for a code from the user's authenticator app:
-
-```bash
-npx -y brightspace-mcp-server@latest setup --javeriana
-```
-
-The wizard:
-
-- prompts for the school's Brightspace URL (skipped with `--purdue`, `--suny`, `--western`, `--tudelft`, `--cuny`, `--leiden`, `--mcgill`, `--ngeeann`, or `--javeriana`)
-- asks whether MFA uses device approval, terminal code entry, or a visible browser, then authenticates accordingly
-- saves the password in the native credential store and public settings in `~/.brightspace-mcp/config.json` (0600)
-- writes the encrypted session below `~/.d2l-session/accounts/<account-hash>/` (AES-256-GCM)
-- auto-configures Claude Desktop, Cursor, and Antigravity, and uses their own CLIs to configure Codex and Claude Code when detected; an existing `brightspace` entry that runs anything other than `npx -y brightspace-mcp-server@latest` is printed and replaced only if the user says yes
-
-Wait for the user to finish login and MFA before continuing.
-
-### 3. Register the MCP server in the user's AI client
-
-The server command to register is:
-
-```
-npx -y brightspace-mcp-server@latest
-```
-
-On **Windows**, wrap with cmd: `cmd /c npx -y brightspace-mcp-server@latest`.
-
-Claude Desktop, Cursor, and Antigravity (`~/.gemini/antigravity/mcp_config.json`) are auto-configured by the setup wizard. When their CLIs are installed, Codex Desktop and CLI are configured together through `codex mcp add`, and Claude Code is configured at user scope through `claude mcp add --scope user`. Before writing, setup compares the existing entry's command with the expected one — Codex via `codex mcp get brightspace --json`, Claude Code by reading the user-scope `mcpServers` in `.claude.json` (so a project `.mcp.json` can't stand in for a missing user registration) — and asks before replacing one that differs. For any other client (Windsurf, Copilot, Zed, Continue, etc.), look up the client's current MCP config format and file path, then add an entry with the command above. Config formats and paths differ per client and change over time, so verify against current client docs rather than guessing.
-
-### 4. Restart the AI client
-
-Tell the user to fully quit and reopen their AI client so it picks up the new MCP server.
+Then tell the user to fully quit and reopen the apps in `restart`, and ask a question such as "What's due this week?". Calling `get_my_courses` from the restarted app is the end-to-end check.
 
 ## Auth
 
@@ -109,11 +105,11 @@ The number can change mid-wait: if the request times out or is denied before app
 
 On a Duo tenant, a device-trust prompt ("Is this your device?") gating the push is answered yes automatically, which also makes Duo skip its device check on later logins from this machine — worth mentioning to a user signing in from a shared computer. `D2L_DUO_PASSCODE` switches from waiting for a push to typing a Duo Mobile passcode.
 
-On Microsoft Entra's MFA page (number match or verification code, on `login.microsoftonline.com` only), the "Don't ask again for N days" checkbox is ticked once when remember-MFA is on, before the number is announced or a code is asked for, and an already-checked box is left alone. Remember-MFA is a `setup` question (default no) saved as `rememberMfa` in `config.json`; `D2L_REMEMBER_MFA` overrides it either way (env > config.json > `false`). This is opt-in and off by default: unless it is turned on the box is left alone and the outcome is recorded as `off`. The window is the tenant's setting; a tenant that never shows the box simply keeps asking. A sign-in that fails after Entra renewed its cookies still saves the browser state when those cookies are strictly newer than the saved ones; any other failure leaves the saved state untouched. `get_server_info` reports `microsoftSession` — `staySignedIn`, `staySignedInExpires`, `rememberMfa` (`ticked`, `already`, `absent`, `unknown`, or `off`), `rememberMfaAt` — read from a plain summary (`microsoft-session.json`, no cookie values) beside the browser state, and omits it when no browser state is saved.
+On Microsoft Entra's MFA page (number match or verification code, on `login.microsoftonline.com` only), the "Don't ask again for N days" checkbox is ticked once when remember-MFA is on, before the number is announced or a code is asked for, and an already-checked box is left alone. Remember-MFA is `setup` option 2 or 3 (default: option 1, off) saved as `rememberMfa` in `config.json`; `D2L_REMEMBER_MFA` overrides it either way (env > config.json > `false`). This is opt-in and off by default: unless it is turned on the box is left alone and the outcome is recorded as `off`. The window is the tenant's setting; a tenant that never shows the box simply keeps asking. A sign-in that fails after Entra renewed its cookies still saves the browser state when those cookies are strictly newer than the saved ones; any other failure leaves the saved state untouched. `get_server_info` reports `microsoftSession` — `staySignedIn`, `staySignedInExpires`, `rememberMfa` (`ticked`, `already`, `absent`, `unknown`, or `off`), `rememberMfaAt` — read from a plain summary (`microsoft-session.json`, no cookie values) beside the browser state, and omits it when no browser state is saved.
 
-Passwordless sign-in is a `setup` question (default no) saved as `passwordless` in `config.json`; `D2L_PASSWORDLESS` overrides it (env > config.json > `false`). When on, `loadConfig` reads no saved password and `setup` saves none (it deletes the account's existing credential-store entry); the default Entra flow counts a username alone as credentials, submits only the username, and waits on Microsoft's passwordless approval view (the "Use your password instead" link or `#idRemoteNGC_*` markers) as an MFA challenge instead of clicking through to the password page, announcing its number like number match. A password page in this mode fails at once with an error naming `D2L_PASSWORDLESS`. Every sign-in then needs a phone approval, so it is for interactive use only.
+Passwordless sign-in is shelved: `setup` no longer asks about it, always saves a password, and drops a `passwordless` value carried over in `config.json`. Only `D2L_PASSWORDLESS` (or a hand-edited `passwordless` in `config.json`) turns it on (env > config.json > `false`). When on, `loadConfig` reads no saved password; the default Entra flow counts a username alone as credentials, submits only the username, and waits on Microsoft's passwordless approval view (the "Use your password instead" link or `#idRemoteNGC_*` markers) as an MFA challenge instead of clicking through to the password page, announcing its number like number match. A password page in this mode fails at once with an error naming `D2L_PASSWORDLESS`. Every sign-in then needs a phone approval, so it is for interactive use only.
 
-Automatic verification-code sign-in is opt-in per account: `setup` optionally takes an authenticator
+Automatic verification-code sign-in is opt-in per account: `setup` option 3 takes an authenticator
 setup key or `otpauth://` URI, `saveSecureConfig` normalizes and stores it in the native credential
 store under a `totp:`-prefixed account (never in `config.json` — `saveConfigStore` throws on it, as
 it does for a password), and `loadConfig` reads it back as `totpUri` whenever a username is
@@ -141,6 +137,14 @@ Visible mode applies to the manual `auth` command, whose window remains open for
 ```bash
 npx -y brightspace-mcp-server@latest auth
 ```
+
+### Fewer 2FA prompts (the two opt-in shortcuts)
+
+`setup` asks ONE multiple-choice question, "How often do you want to approve sign-ins on your phone?", right after the MFA-method question: **1** every time (default, safest), **2** remember this computer (`rememberMfa` / `D2L_REMEMBER_MFA`, ticks Microsoft's "Don't ask again" box), **3** this computer answers Microsoft's code requests itself (a **saved authenticator key** in the OS keychain, or `D2L_TOTP_SECRET`; the server types the 6-digit code itself; also sets `rememberMfa` true). Options 2 and 3 are opt-in and not for shared computers, and 3 only helps when Microsoft asks for a code (otherwise sign-in falls back to the phone). The detail is in one place: [docs/sign-in.md#fewer-2fa-prompts](docs/sign-in.md#fewer-2fa-prompts), including the steps for getting the key from https://mysignins.microsoft.com. Send users there rather than re-explaining. Turn on by rerunning `setup` and picking 2 or 3; turn off by rerunning it and picking 1. Wording and the question itself (`askShortcutQuestion`, driven through a small `ShortcutIO` so it is testable) live in `src/utils/two-factor-shortcuts.ts`, shared by `setup`, the MFA tip, and `doctor`:
+
+- Picking 1 or 2 while a key is saved asks "Remove the saved authenticator key from this computer? (yes/no) [yes]" and, on yes, deletes it after the config is saved (`deleteStoredTotpUri`). Picking 3 with no key saved shows a short how-to and the hidden key prompt; Enter with no key saves option 2 and says so. With a key already saved, an explicit 3 offers a replacement (Enter keeps it). On a rerun `setup` prints "Currently: N" and makes it the Enter default; a key saved without remember-this-device keeps remember off on Enter. The question is asked for every school and mode (no per-school gating exists: whether a code can be typed is only known at sign-in time); `askShortcutQuestion` takes an `applicable` pair and renumbers or skips if that ever changes. The key is never printed.
+- A pending MFA approval message (`mfaPending` in `src/tools/tool-helpers.ts`) ends with one "Tip for the user: to be asked less often, rerun `setup`" line carrying the docs link, only when both options are off. It is never added when either is on, to a duplicate in the same batch, or to any other failure kind. `src/index.ts` records the state at startup with `setActiveShortcuts`; until then no tip is shown.
+- `doctor` prints one `2FA shortcuts: remember this device on/off, authenticator key saved/not saved` line after its checks (informational: it never changes the exit code), plus the docs link when both are off. It only checks that a key exists and never reads the key into any output; if the credential store cannot be read it says "not checked".
 
 ## Sign out early (`sign_out` / `auth --logout`)
 
@@ -184,15 +188,15 @@ Registered in `src/tools/index.ts`, schemas in `src/tools/schemas.ts`:
 | `get_assignment_rubric` | Full rubric table (criteria groups, levels, points, descriptions) for a dropbox assignment, plus the student's own graded outcome per criterion when the tenant exposes it |
 | `get_upcoming_due_dates` | Due dates across all courses within a window |
 | `get_calendar_events` | Course calendar events (exams, labs, schedule changes, hand-made deadlines) in a window, default the next 7 days |
-| `get_announcements` | Recent course announcements, with each one's attached files (`attachments`) |
+| `get_announcements` | Recent course announcements, with each one's attached files (`attachments`). `body` is the full post as markdown converted from D2L's Html (links, lists, tables and embedded-content addresses kept), falling back to D2L's plain Text only for a text-only post; `pagination.truncated` means more posts remain, never that a body was cut |
 | `get_syllabus` | Syllabus document for a course |
-| `get_course_content` | Module tree and content topics; module descriptions are Markdown preserving embedded links (with plain-text fallback) |
+| `get_course_content` | Module tree and content topics; module descriptions are Markdown preserving embedded links (with plain-text fallback); a module that links course files from its description also carries `courseFiles`, the paths to pass to `download_file` as `coursePath` |
 | `get_discussions` | Discussion forums and recent posts |
 | `search_course` | Keyword search across a course's content (modules/topics/file names), announcements, and discussion forums/topics in one call |
 | `get_roster` | Classlist for a course |
 | `get_my_groups` | The current user's project/discussion groups in a course, with each group's members |
 | `get_classlist_emails` | Emails of classmates and instructors |
-| `download_file` | Get a file attachment — course content (`topicId`), a submission (`folderId` + `fileId`), or an announcement attachment (`newsId` + `fileId`). `downloadPath` is optional: omit it to get the file back inline in the tool response (extracted text for PDFs/Office docs, an image block for jpeg/png/gif/webp, capped at 10MB / 400k extracted characters), or pass an absolute host path to save it to disk (streamed, up to 2GB) |
+| `download_file` | Get a file attachment — course content (`topicId`), a file an instructor linked by path inside a module description rather than adding as a topic (`coursePath`: `Notes/Lecture 1.pdf` or the `quickLink.d2l?...type=coursefile` URL from `get_course_content`; fetched with the saved web session, so it needs a signed-in session), a submission (`folderId` + `fileId`), or an announcement attachment (`newsId` + `fileId`). `downloadPath` is optional: omit it to get the file back inline in the tool response (extracted text for PDFs/Office docs, an image block for jpeg/png/gif/webp, capped at 10MB / 400k extracted characters), or pass an absolute host path to save it to disk (streamed, up to 2GB) |
 | `get_assignment_files` | Read the files attached to an assignment (spec, rubric, starter workbook) and return their text |
 | `get_announcement_files` | Read the files attached to an announcement (prompts, rubric, updated schedule) and return their text |
 | `get_video_transcript` | Transcript of a video embedded in course content (Kaltura, YouTube), with timestamps |
@@ -200,14 +204,14 @@ Registered in `src/tools/index.ts`, schemas in `src/tools/schemas.ts`:
 | `get_dropbox_folders` | Every assignment (dropbox) folder in a course, with due dates, submission type, visibility, and whether rubrics are attached |
 | `get_dropbox_submissions` | Instructor/TA: every student's (or group's) submission to a dropbox folder — submitter, submitted date, late status, files, and feedback/grading status |
 | `get_dropbox_user_submissions` | Instructor/TA: all submissions made by one specific student (or group) in a dropbox folder |
-| `get_dropbox_feedback` | Instructor/TA: feedback already saved for a user or group in a dropbox folder — score, graded state, feedback text, rubric assessment |
+| `get_dropbox_feedback` | Feedback saved for a dropbox folder — score, graded state, feedback text, rubric assessment. Omit `entityType`/`entityId` to read the signed-in student's own released feedback; pass them (instructor/TA) for any user or group |
 | `get_rubrics_for_object` | The full rubric table (criteria, levels, points) attached to a dropbox folder |
 | `download_dropbox_submission_file` | Instructor/TA: download one file from a student's (or group's) dropbox submission |
 | `sign_out` | Delete this computer's saved Brightspace session for the configured account (the in-chat `auth --logout`), then clear this server's response cache and in-memory token. Call it ONLY when the user explicitly asks to sign out or log out of Brightspace — never to fix an error, as part of another answer, or to retry a sign-in. Annotated `destructiveHint: true` (not read-only), so clients ask first. Plain-text result; no arguments |
 
 These twenty-six are the whole surface. An available-update notice, when there is one, rides along as a second text block on the first successful result.
 
-Of the `get_dropbox_*`/`download_dropbox_submission_file` tools above, `get_dropbox_submissions`, `get_dropbox_user_submissions`, `get_dropbox_feedback`, and `download_dropbox_submission_file` are instructor/TA-side: they read every student's submissions and feedback for a course, which Brightspace only grants to course staff. A student account calling one of those gets a clear "Instructor or TA access required for this course" note (403) rather than a generic or broken-looking error. `get_dropbox_folders` and `get_rubrics_for_object` read the same folder-listing endpoint a student's own client uses, so they are not gated the same way. A 404 (no folders, no submissions, folder not found) comes back as an empty list/null with an explanatory `note`, not a failure. They are read-only — there is no tool in this server that posts a grade or feedback back to Brightspace.
+Of the `get_dropbox_*`/`download_dropbox_submission_file` tools above, `get_dropbox_submissions`, `get_dropbox_user_submissions`, `get_dropbox_feedback` (when given another user's or a group's id), and `download_dropbox_submission_file` are instructor/TA-side: they read every student's submissions and feedback for a course, which Brightspace only grants to course staff. A student account calling one of those gets a clear "Instructor or TA access required for this course" note (403) rather than a generic or broken-looking error. `get_dropbox_folders` and `get_rubrics_for_object` read the same folder-listing endpoint a student's own client uses, so they are not gated the same way. `get_dropbox_feedback` called with no `entityType`/`entityId` reads the student's own feedback (`feedback/user/{whoami id}`), which D2L documents as visible to the learner once released: a 403 or 404 there is reported as "not released / not graded", not as a missing staff role. A 404 (no folders, no submissions, folder not found) comes back as an empty list/null with an explanatory `note`, not a failure. They are read-only — there is no tool in this server that posts a grade or feedback back to Brightspace.
 
 `download_file`'s two response modes (`src/tools/download-file.ts`): disk mode (`downloadPath` given) keeps the same JSON shape, with an additive `mode: "disk"` field; it streams the body to a hidden temporary file in the target directory (`secureStreamDownload`), type-checks it there, and renames it into place, so it is capped at 2GB rather than the 50MB that bounds in-memory inline downloads. Inline mode (`downloadPath` omitted, and now the default) returns `mode: "inline"` content directly in the tool response instead: extracted text (via the existing `pdf-extractor.ts`/`zip-extract.ts`) for PDFs and `.docx`/`.xlsx`/`.pptx`, an `ImageContent` block for `jpeg`/`png`/`gif`/`webp`, and a short description pointing back to disk mode for anything else. It deliberately never emits an MCP `EmbeddedResource` — some clients route an embedded `application/pdf` into a document pipeline that rejects PDFs containing JBIG2-compressed images (common in scanned academic PDFs) and can fail the whole tool response. Inline responses are capped at 10MB and 400,000 characters of extracted text, each with an explicit truncation/oversize message naming `downloadPath` as the way to get the full file. `validateFileType`'s magic-byte allowlist is enforced in both modes. `download_dropbox_submission_file` (`src/tools/download-dropbox-submission-file.ts`) always saves to disk and goes through the same `secureStreamDownload` path and 2GB `DISK_MAX_FILE_SIZE` cap (listed size, Content-Length, and bytes actually received).
 
@@ -240,21 +244,23 @@ Assignment rows additionally carry `submissionStatus` (`"submitted"` / `"not_sub
 
 Assignments, quizzes, and due dates each carry a `url` field linking into Brightspace. For group assignment folders, `get_assignments`, `get_assignment_files` (discovery and file-reading), and `get_upcoming_due_dates` resolve the learner's group within the folder's `GroupTypeId` category using the same cached membership helper as `get_my_groups`. Individual folders (missing or null `GroupTypeId`, per [D2L's folder reference](https://docs.valence.desire2learn.com/res/dropbox.html#Dropbox.DropboxFolder)) use `grpid=0`; group folders use their actual group identifier. Missing, inaccessible, or ambiguous membership (or invalid non-null group category metadata) returns the course home with `urlKind: "course-home"` and a `urlNote` directing the learner to Assignments. A resolved folder has `urlKind: "assignment"`. The due-date tool still makes no submission, feedback, or attempt requests. `get_assignments` also returns `gradeOnly` items for gradebook columns that match no assignment or quiz, such as a proctored exam. `get_upcoming_due_dates` reads `DueDate` from assignments, `DueDate ?? EndDate` from quizzes,, `DueDate` from discussion topics (`type: "discussion"`), and each course's calendar events (`type: "event"`, `dueDate` = the event's start, plus `endDate` and `location` when set). A topic with no `DueDate` is an ungraded forum and is excluded. Brightspace generates a calendar event for every dated assignment, quiz, and discussion; an event generated from an item already in the list is dropped, so each deadline appears once, while hand-made events (exams, labs) always stay.
 
+`get_assignments` finds a course's quizzes through three routes and merges them by quiz id: the paged `/quizzes/` list (`source: "quizList"`), quiz topics in `/content/toc` that the list omits (`source: "courseContent"`), and gradebook columns whose `AssociatedTool.ToolItemId` names a quiz neither route listed (`source: "gradebook"`; accepted only when `GET /quizzes/{id}` answers with a `GradeItemId` equal to that column's id, so a discussion or survey sharing the id is never mistaken for a quiz). **Behavior change:** a gradebook column linked to a quiz the list omits used to appear as a `gradeOnly` row; when that quiz is readable it now appears as a quiz row (`type: "quiz"`, the quiz id, `source: "gradebook"`) instead, with the quiz's dates and attempts. Gradebook-only rows now appear on tenants that send only the documented string `GradeType` (previously only a numeric `GradeObjectTypeId` matched), and never for hidden grade columns (`GradeObject.IsHidden`), the columns of hidden assignment folders, or the columns of quizzes with `IsActive: false`. At most 30 content quizzes per course have their own record or topic read; the rest are listed from the table of contents alone (`detailsStatus: "unavailable"`) and `quizCoverage` is `incomplete` with a note saying so. A column whose quiz cannot be read stays a `gradeOnly` row, and a `gradeOnly` row named like a quiz should be treated as a quiz whose details could not be read. A gradebook column counts as student-scored when its documented string `GradeType` is `Numeric`, `PassFail`, `SelectBox` or `Text` (a numeric `GradeObjectTypeId` of 1 to 4 is still accepted as a fallback); calculated, formula and category columns are ignored. The table of contents is requested with `ignoreDateRestrictions=true` (documented as open to students, supported from LE 1.67) because D2L's default view hides every module or topic outside its date window, which is where a closed or not-yet-open quiz lives; only a 400, 403 or 404 on that request falls back to the plain view, while a 429, a 5xx or a network failure counts the content as unread without a second request. A quiz topic is recognized by `ActivityType` 4, `TypeIdentifier` `Quiz`, a `type=quiz` quickLink, or a `/lms/quizzing/user/quiz_*` Url; its id comes from `ToolItemId`, a numeric `ActivityId`, or the Url's `qi=`, and failing those, from the gradebook column the topic's `GradeItemId` names (when that column's tool agrees with the topic's `ToolId`), so the topic and its column are one quiz. Hidden and broken topics are skipped. An `IsExempt` topic (D2L: "the user is exempt from the topic") is kept and its row carries `exempt: true`. A topic that still has no id is listed with `id: null`, its `topicId`, and a content-viewer `url`, unless a listed quiz already has the same title; the same id-less quiz linked from several modules (same title and link) is one row, and a gradebook column with the same title is treated as that quiz rather than listed again. Only an explicit `IsActive: false` hides a quiz; closed quizzes stay listed. Quizzes found without the quiz API carry no attempt data (`attemptStatus: "unknown"`), never an inferred zero, and a 404 from the attempts route only counts as zero attempts for a quiz the course's quiz list returned. Additive quiz-row fields, each present only when it applies: `availability` (`notYetOpen`, `open` or `closed`, from the quiz's own start and end dates; omitted when it has none), `detailsStatus: "unavailable"` with a `detailsStatusNote` (the row was built from course-content metadata alone because Brightspace would not return the quiz's details, which happens for closed, not-yet-open or special-access quizzes), and `exempt: true`. Gradebook probes are bounded: with a known quiz tool (from a listed quiz's column or a content quiz topic's `ToolId`) only that tool's columns are asked, at most 20 per course; with none known, at most 5. A probe that answered 404 or 403 is not repeated for ten minutes (per signed-in client; never for a 401 or 5xx). Each course also carries `quizCoverage` (`"complete"` or `"incomplete"`, with a `quizCoverageNote` when incomplete): incomplete means a source could not be read, including the content table of contents falling back to the default date-restricted view; a 404 on the quiz list (a course without the quiz tool) counts as answered and empty. `complete` means every source answered, not that every quiz is guaranteed to be listed: a quiz absent from all three is invisible to this tool, and an absent quiz must never be reported as missed or not taken.
+
 `get_assignment_rubric` takes `courseId` and `assignmentId` (the dropbox folder id `get_assignments` already returns). It reads the folder's embedded `Assessment.Rubrics` first, falling back to the `/rubrics?objectType=Dropbox&objectId=` listing when a tenant omits them there. The student's own graded outcome is read from the same `myFeedback` route `get_assignments` already calls — never the unstable per-assessment rubric route — and is merged in per criterion when the tenant exposes it. A folder that 403s or 404s, or carries no rubric at all, answers `{ rubrics: [], note }` rather than an error.
 
-Public instructor feedback is normalized from HTML to Markdown, with plain text as a fallback; private comments are never returned. Dropbox assignments preserve `feedback.score` and `feedback.feedback` and add `feedback.rubricAssessments` (rubric id, overall score/comment, and criterion outcomes when supplied). Assignment `feedbackStatus` distinguishes `retrieved` (the API returned a feedback record), `restricted` (403), `unavailable` (404 or null response), and `error` (another failed read). Grade rows add `gradeObjectId`, `feedbackStatus` (`retrieved` when public comments were returned, otherwise `unavailable`), and `feedbackUrl`. Assignments also add `feedbackCommentsStatus` (`retrieved` when overall or rubric comments were returned, otherwise `unavailable`), so a score-only record never implies that comments were retrieved. Assignments add a course gradebook `feedbackUrl`; grade rows preserve the linked quiz's `feedbackUrl` when present and otherwise use the gradebook URL. Both tools add `feedbackStatusNote` when comments were not returned. These URLs provide a place to check published feedback; they are not per-evaluation links. A null comment, missing feedback API record, or permission failure does not prove that published feedback is absent in Brightspace. No HTML pages are scraped and no restricted quiz viewer is opened by these tools.
+Public instructor feedback is normalized from HTML to Markdown, with plain text as a fallback; private comments are never returned. Dropbox assignments preserve `feedback.score` and `feedback.feedback` and add `feedback.rubricAssessments` (rubric id, overall score/comment, and criterion outcomes when supplied). When the `myFeedback` read returns nothing (it is not a route D2L documents) and work was submitted, `get_assignments` falls back to the documented routes for the learner's own feedback: the `Feedback` D2L embeds in `submissions/mysubmissions/` (EntityDropbox, "Existing feedback will also be included if published"), then `feedback/user/{id}` for individual folders; draft (`IsGraded: false`) feedback is ignored, and `feedbackSource` (`myFeedback`, `submission`, or `user`) says which route answered. Assignment `feedbackStatus` distinguishes `retrieved` (the API returned a feedback record), `restricted` (403), `unavailable` (404 or null response), and `error` (another failed read). Grade rows add `gradeObjectId`, `feedbackStatus` (`retrieved` when public comments were returned, otherwise `unavailable`), and `feedbackUrl`. Assignments also add `feedbackCommentsStatus` (`retrieved` when overall or rubric comments were returned, otherwise `unavailable`), so a score-only record never implies that comments were retrieved. Assignments add a course gradebook `feedbackUrl`; grade rows preserve the linked quiz's `feedbackUrl` when present and otherwise use the gradebook URL. Both tools add `feedbackStatusNote` when comments were not returned. These URLs provide a place to check published feedback; they are not per-evaluation links. A null comment, missing feedback API record, or permission failure does not prove that published feedback is absent in Brightspace. No HTML pages are scraped and no restricted quiz viewer is opened by these tools.
 
 Every `dueDate`/`DueDate`-style field in `get_assignments` and `get_upcoming_due_dates` carries an additive `dueIn` string next to it — a relative rendering ("in 3 days", "yesterday", "in 2 hours") computed with `Intl.RelativeTimeFormat`, so a caller never has to do its own date math against the raw ISO timestamp. `dueIn` is `null` wherever the due date itself is `null` (e.g. a `gradeOnly` row) or unparseable; `dueDate`/`DueDate` is never modified.
 
 A dropbox assignment in `get_assignments` carries an additive `linkAttachments: [{ name, url }]` array when the instructor attached one or more URL links to the folder (D2L's `LinkAttachments`), mapped from `Title`/`Href`; a link with no `Href` is dropped. The field is omitted entirely, not an empty array, for the common case of a folder with no link attachments, so existing callers reading the assignment shape see no change.
 
-The all-courses branch of `get_my_grades` returns an additive top-level `restrictedCourses: [{ courseId, courseName, gradeUrl }]` array for courses where the tenant's grade API answers 403 (an institutional access policy, not missing enrollment) — `gradeUrl` is the course's gradebook deep link (`gradebookUrl()` in `src/utils/deep-links.ts`). These courses are no longer silently dropped, and `courses` itself is unchanged. The single-course form of `get_my_grades` keeps the same plain error-result shape on a 403, but the error text now names the same gradebook URL so the student can open their grades directly.
+The all-courses branch of `get_my_grades` returns an additive top-level `restrictedCourses: [{ courseId, courseName, gradeUrl }]` array for courses where the tenant's grade API answers 403 (an institutional access policy, not missing enrollment) — `gradeUrl` is the course's gradebook deep link (`gradebookUrl()` in `src/utils/deep-links.ts`). These courses are no longer silently dropped, and `courses` itself is unchanged. The single-course form of `get_my_grades` keeps the same plain error-result shape on a 403, but the error text now names the same gradebook URL so the student can open their grades directly. Any other per-course failure (a 404, a 5xx, a network error) puts the course in a `failedCourses: [{ courseId, courseName, gradeUrl }]` array with a `notice`, both present only when something failed, so a course is never missing from the result without a trace (#245).
 
 A `get_my_grades` row scored from a quiz (matched by the quiz list's `GradeItemId`) carries an additive `feedbackUrl` — the quiz's page (`quizUrl()`) — and, when the gradebook `comments` is null, a `feedbackNote` saying feedback may still exist on the quiz's submissions page, which the student API cannot read and which can require a restricted viewer such as Respondus LockDown Browser. A null `comments` without `feedbackNote` means no comment was returned and no quiz association was resolved; it never proves published feedback is absent. Rows not linked to a quiz keep their gradebook source and retrieval status. A refused quiz list loses only the quiz association; grades and gradebook source links remain available.
 
 `download_file`'s magic-byte allowlist (`ALLOWED_MIME_TYPES` in `src/utils/file-validator.ts`) also accepts archives beyond zip: `application/x-7z-compressed`, `application/gzip` (plus the legacy alias `application/x-gzip`, kept the way `application/x-zip-compressed` already sits beside `application/zip`), `application/x-tar`, and `application/x-bzip2` — so starter-code and resource archives in those formats download instead of being refused outright.
 
-`get_calendar_events` takes optional `courseId`, `from`/`to` (ISO 8601 with offset; default now → now + 7 days), and `includeGenerated` (default `false`). Each event is `{ id, title, courseId, courseName, start, end?, location?, description? (markdown), url, generatedFrom? }`, sorted by `start`; `generatedFrom: { type, id }` marks an event Brightspace generated from another item (`type` is `assignment`, `quiz`, `discussion`, `module`, `topic`, …) and those are hidden unless `includeGenerated` is true. It reads `/calendar/events/myEvents/`, the per-user feed that honours event visibility. A course whose calendar fails to load is skipped; the others still return.
+`get_calendar_events` takes optional `courseId`, `from`/`to` (ISO 8601 with offset; default now → now + 7 days), and `includeGenerated` (default `false`). Each event is `{ id, title, courseId, courseName, start, end?, location?, description? (markdown), url, generatedFrom? }`, sorted by `start`; `generatedFrom: { type, id }` marks an event Brightspace generated from another item (`type` is `assignment`, `quiz`, `discussion`, `module`, `topic`, …) and those are hidden unless `includeGenerated` is true. It reads `/calendar/events/myEvents/`, the per-user feed that honours event visibility. A course whose calendar fails to load still lets the others return, and a second text block in `content[1]` names its course id so the list is not read as complete.
 
 `get_course_content` topics and modules, and `get_announcements` items, carry a `lastModified` field (D2L's `LastModifiedDate`, or `null` when the tenant didn't send one). Both tools also accept an optional `modifiedSince` (ISO 8601 datetime, e.g. `2026-01-15T00:00:00Z`) that returns only items at or after that timestamp — useful for "what's new since I last checked" instead of re-fetching everything. A malformed value is a validation error naming the expected format, not a silently empty result. An item with no `lastModified` is always included rather than excluded, the same way a null due date is never treated as "not due" elsewhere in this server — dropping it silently would be indistinguishable from data loss. For `get_course_content`, a module is kept whenever any descendant topic matches, even if the module's own timestamp doesn't, so a matched topic never arrives with no surrounding context; the module's own `children` array reflects only the topics that matched. Passing `modifiedSince` adds `modifiedSince`, `returned`, and `filteredOut` to the response so a caller can tell "nothing changed" apart from "the filter was wrong"; omitting it leaves the response shape exactly as before (a bare array for `get_announcements`).
 
@@ -265,7 +271,13 @@ While a sign-in is still being worked on in the background, `get_assignments`, `
 ```
 src/
   index.ts                  MCP server entrypoint, registers tools
-  setup.ts                  Setup wizard (CLI subcommand `setup`)
+  setup.ts                  `setup`: interactive wizard and `--sign-in`; routes `--prepare`
+  setup/
+    args.ts                 setup's flags and modes (wizard, --prepare, --sign-in)
+    presets.ts              School presets (`--purdue`, ...) and lookup by URL
+    config.ts               Saved-settings merge shared by every mode
+    clients.ts              AI apps setup registers in (one list for wizard and prepare)
+    prepare.ts              `setup --prepare`: no-prompt install steps for agents, JSON result
   auth-cli.ts               Manual reauth (CLI subcommand `auth`; `auth --logout` ends the saved session)
   doctor.ts                 Beginner diagnostic (CLI subcommand `doctor`)
   update.ts                 Self-update checker
@@ -314,12 +326,17 @@ src/
     config-store.ts         ~/.brightspace-mcp/config.json reader/writer
     config.ts               Resolved config (store + env fallback)
     course-filter.ts        Filter enrolled vs archived courses, and (currentOnly) vs out-of-term courses
+    course-files.ts         Course-file path rules shared by download_file (`coursePath`) and get_course_content (`courseFiles`)
     download-helpers.ts     Stream-to-disk with validation
+    browser-install.ts      Chromium check (prepare, doctor), install via the bundled Playwright, missing-browser hint
     file-validator.ts       Magic-byte file-type checks
+    saved-session.ts        Read-only saved sign-in checks shared by doctor and prepare
+    html-attributes.ts      Quote-aware tag attribute reading and entity decoding for raw D2L HTML
     html-converter.ts       HTML to Markdown via turndown
     pdf-extractor.ts        PDF text extraction via unpdf
     logger.ts               Structured logging
     update-checker.ts       npm version comparison
+    two-factor-shortcuts.ts The one "how often do you approve sign-ins" setup question, plus shared wording/state (setup, MFA tip, doctor)
     errors.ts               User-facing error taxonomy
   types/                    Shared TypeScript types
 ```
@@ -328,7 +345,10 @@ src/
 
 | Command | What it does |
 |---------|--------------|
-| `npx -y brightspace-mcp-server@latest setup` | Interactive setup wizard |
+| `npx -y brightspace-mcp-server@latest setup` | Interactive setup wizard (needs a terminal) |
+| `npx -y brightspace-mcp-server@latest setup --purdue --prepare --username <u> --json` | For AI agents: everything but the password and sign-in, with no prompts — checks, Chromium download, settings, registering AI apps. Takes `--url`, `--campus`, `--replace`, `--no-browser-install`. See [Installing it for a user](#installing-it-for-a-user) |
+| `npx -y brightspace-mcp-server@latest setup --purdue --sign-in` | The person's last install step: password, how they confirm sign-in, then sign-in. Uses what `--prepare` saved |
+| `npx -y brightspace-mcp-server@latest setup --help` | Every setup flag |
 | `npx -y brightspace-mcp-server@latest setup --purdue` | Setup with Purdue preset |
 | `npx -y brightspace-mcp-server@latest setup --suny` | Setup with SUNY preset (also asks for campus) |
 | `npx -y brightspace-mcp-server@latest setup --cuny` | Setup with CUNY preset |
@@ -337,12 +357,38 @@ src/
 | `npx -y brightspace-mcp-server@latest setup --javeriana` | Setup with Javeriana Cali preset |
 | `npx -y brightspace-mcp-server@latest auth` | Manual reauth |
 | `npx -y brightspace-mcp-server@latest auth --logout` | Delete this computer's saved session so the next call does a full sign-in. Keeps the password, `config.json`, and credential-store entries. Local only |
-| `npx -y brightspace-mcp-server@latest doctor` | Diagnose a broken setup — Node version, saved config, credential store, Brightspace reachability, saved sign-in, a real course-list call, and installed version, each as a ✓/✗ line with one plain-English next step |
+| `npx -y brightspace-mcp-server@latest doctor` | Diagnose a broken setup — Node version, Chromium, saved config, credential store, Brightspace reachability, saved sign-in, a real course-list call, and installed version, each as a ✓/✗ line with one plain-English next step, then one informational line on the 2FA shortcuts (remember this device, saved authenticator key). `--json` prints `{checks, allOk, notes}` instead |
 | `npx -y brightspace-mcp-server@latest` | Run the MCP server (registered in AI client config) |
 | `npm run build` | Compile TypeScript to `build/` |
 | `npm run dev` | Watch-mode TypeScript compile |
 | `npm run test` | Run Vitest suite |
 | `npm run test:run` | Run Vitest once |
+
+## Environment variables
+
+Every setting the server reads from the environment. All are optional; `setup` writes the usual ones to `~/.brightspace-mcp/config.json`, and an environment value overrides the saved one (env > `config.json` > default, resolved in `src/utils/config.ts`). A `.env` file in the working directory is loaded too. Boolean settings accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`; anything else is ignored with a `[config]` warning and the next source wins. `tests/release/env-docs.test.ts` fails if `src/` reads a `D2L_*` variable this table does not name.
+
+| Variable | Default | What it does |
+|----------|---------|--------------|
+| `D2L_BASE_URL` | `https://purdue.brightspace.com` | The school's Brightspace URL. Must be HTTPS with no embedded credentials; only the origin is kept |
+| `D2L_USERNAME` | from `config.json` | Sign-in username. Also selects the account's session directory (`accounts/<account-hash>/`) |
+| `D2L_PASSWORD` | none | Sign-in password. Copied into the OS credential store for the account on startup, never to a file. Ignored when passwordless sign-in is on |
+| `D2L_SESSION_DIR` | `~/.d2l-session` | Root of the per-account session directories. `~` is expanded |
+| `D2L_TOKEN_TTL` | `3600` | Seconds an access token is used before it is re-minted. Must be a whole positive number; anything else is ignored with a warning |
+| `D2L_HEADLESS` | `true` | `false` shows the browser during sign-in, for MFA methods that need a click. Automatic recovery stays headless unless this is set explicitly |
+| `D2L_REMEMBER_MFA` | `false` | Tick Microsoft Entra's "Don't ask again" box (see [Re-auth](#re-auth)) |
+| `D2L_PASSWORDLESS` | `false` | Microsoft Entra passwordless phone approval; no password is read or saved (see [Re-auth](#re-auth)) |
+| `D2L_TOTP_SECRET` | none | Authenticator setup key or `otpauth://` link for Entra code challenges. For CI and containers only; weaker than the keychain entry `setup` saves |
+| `D2L_DUO_PASSCODE` | unset | Any non-empty value makes Duo type a Duo Mobile passcode instead of waiting for a push |
+| `D2L_CAMPUS` | from `config.json` | Campus on a shared multi-campus instance (SUNY). `setup --suny` asks for it |
+| `D2L_ACCESS_TOKEN` | none | Pre-issued Bearer token; skips the browser (see [Browser-free sign-in](#browser-free-sign-in-d2l_session_cookie--d2l_access_token)) |
+| `D2L_SESSION_COOKIE` | none | Pasted `d2lSessionVal`/`d2lSecureSessionVal` cookies; skips the browser (same section) |
+| `D2L_INCLUDE_COURSES` | all | Comma-separated course (org unit) ids to keep. Applies to multi-course tools; an explicit `courseId` argument bypasses it |
+| `D2L_EXCLUDE_COURSES` | none | Comma-separated course ids to hide |
+| `D2L_ACTIVE_ONLY` | `true` | Hide inactive enrollments and courses D2L reports as closed (`CanAccess: false`) |
+| `D2L_CURRENT_ONLY` | `false` | Keep only courses whose `Access.StartDate`–`Access.EndDate` window contains now, like Brightspace's "Current Courses" widget. Courses with neither date are dropped |
+| `D2L_NO_UPDATE_CHECK` | unset | Any non-empty value turns off the npm new-version notice and the auth CLI's self-update re-exec |
+| `D2L_DEV_MODE` | unset | Exactly `true` writes a local, content-free activity log ([docs/dev-mode.md](docs/dev-mode.md)) |
 
 ## Storage locations
 
