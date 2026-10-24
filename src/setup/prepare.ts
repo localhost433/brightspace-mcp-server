@@ -139,6 +139,8 @@ function appLine(outcome: RegistrationOutcome): PrepareStep {
       return ok("app", `${outcome.name}: old "brightspace" entry replaced`, false);
     case "current":
       return ok("app", `${outcome.name}: already set up`, false);
+    case "shared_http":
+      return ok("app", `${outcome.name}: already set up to use the shared server at ${outcome.url}`, false);
     case "different_left":
       return fail("app", `${outcome.name}: "brightspace" already runs ${outcome.current} — left as is (pass --replace to change it)`, false);
     case "failed":
@@ -152,8 +154,8 @@ export async function runPrepare(args: SetupArgs, overrides: Partial<PrepareDeps
 
   // ── Node ──
   steps.push(nodeVersionSupported(deps.nodeVersion)
-    ? ok("node", `Node.js ${deps.nodeVersion} (20 or newer)`)
-    : fail("node", `Node.js ${deps.nodeVersion} is too old — install Node 20 or newer from https://nodejs.org/`));
+    ? ok("node", `Node.js ${deps.nodeVersion} (22 or newer)`)
+    : fail("node", `Node.js ${deps.nodeVersion} is too old — install Node 22 or newer from https://nodejs.org/`));
 
   // ── School ──
   const existing = deps.readExistingConfig();

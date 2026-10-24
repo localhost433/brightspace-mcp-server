@@ -18,6 +18,7 @@ import {
   isSafeDetail,
   type DownloadFailureKind,
 } from "../utils/download-errors.js";
+import { tagErrorKind, withErrorKind, type ErrorKind } from "../utils/error-kind.js";
 
 /**
  * Append an available-update notice to an already-built content array and
@@ -72,8 +73,8 @@ export function toolResponseWithNotice(data: unknown, notice: string): CallToolR
 /**
  * Wrap error message as MCP-compatible tool result
  */
-export function errorResponse(message: string): CallToolResult {
-  return {
+export function errorResponse(message: string, kind?: ErrorKind): CallToolResult {
+  const result: CallToolResult = {
     content: [
       {
         type: "text",
@@ -82,6 +83,8 @@ export function errorResponse(message: string): CallToolResult {
     ],
     isError: true,
   };
+  // The dev activity log records the category, never the message.
+  return kind ? tagErrorKind(result, kind) : result;
 }
 
 /**
@@ -153,16 +156,17 @@ const AUTH_FAILURE_GUIDANCE: Record<AuthFailureKind, string> = {
  * arbitrary child output, so it is safe to interpolate here.
  */
 const MFA_ALREADY_REPORTED =
-  "Brightspace sign-in is already in progress; another call in this batch has the number to " +
-  "approve. Retry this call once the sign-in completes.";
+  "Brightspace sign-in is already in progress; another call, possibly in another open chat, has the " +
+  "number to approve. Retry this call once the sign-in completes.";
 
 const AUTOMATIC_ALREADY_REPORTED =
-  "Brightspace sign-in is already in progress, answering its own verification code; another call " +
-  "in this batch has the details. Retry this call once the sign-in completes. Don't ask the user " +
-  "to approve anything.";
+  "Brightspace sign-in is already in progress, answering its own verification code; another call, " +
+  "possibly in another open chat, has the details. Retry this call once the sign-in completes. " +
+  "Don't ask the user to approve anything.";
 
 function authFailureMessage(error: AuthProcessError): string {
-  // Another call in this parallel batch already carries the number and the
+  // Another call in this parallel batch (which, behind the shared HTTP
+  // server, may be another chat's) already carries the number and the
   // instructions (issue #212). Repeating them in every response made a batch
   // unreadable; one short line is enough for this call.
   if (error.kind === "mfaPending" && error.duplicate) return MFA_ALREADY_REPORTED;
@@ -263,6 +267,10 @@ export function authPendingNotice(error: unknown): string {
 export function sanitizeError(error: unknown): CallToolResult {
   // Log full error to stderr for debugging (token redaction handled by logger)
   log("ERROR", "Tool error", error);
+  return withErrorKind(describeError(error), error);
+}
+
+function describeError(error: unknown): CallToolResult {
 
   // Authentication runs inside the tool call now, so its failures surface
   // here rather than from a dedicated auth tool. Checked first: the kind

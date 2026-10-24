@@ -75,7 +75,7 @@ export function registerGetDropboxUserSubmissions(
           if (error instanceof ApiError && error.status === 403) {
             return errorResponse(
               "Instructor or TA access required for this course. This tool reads another user's " +
-              "dropbox submissions, which Brightspace only grants to course staff."
+              "dropbox submissions, which Brightspace only grants to course staff.", "permission"
             );
           }
           if (error instanceof ApiError && error.status === 404) {
@@ -101,7 +101,10 @@ export function registerGetDropboxUserSubmissions(
           });
         }
 
+        // A 404 means no feedback yet, matching the "not graded yet" default
+        // below. Any other failure leaves the grading status unknown.
         let feedback: D2LFeedback | null = null;
+        let feedbackUnread = false;
         if (!ignoreFeedback) {
           try {
             const feedbackPath = apiClient.le(
@@ -109,8 +112,11 @@ export function registerGetDropboxUserSubmissions(
               `/dropbox/folders/${folderId}/feedback/user/${userId}`
             );
             feedback = await apiClient.get<D2LFeedback>(feedbackPath);
-          } catch {
-            // No feedback yet — silently skip, matching the "not graded yet" default below.
+          } catch (error) {
+            if (!(error instanceof ApiError && error.status === 404)) {
+              feedbackUnread = true;
+              log("INFO", "get_dropbox_user_submissions: Feedback could not be read", { courseId, folderId, userId });
+            }
           }
         }
 
@@ -129,6 +135,8 @@ export function registerGetDropboxUserSubmissions(
 
         const feedbackStatus = ignoreFeedback
           ? undefined
+          : feedbackUnread
+          ? null
           : feedback
           ? {
               isGraded: feedback.IsGraded,
@@ -149,6 +157,9 @@ export function registerGetDropboxUserSubmissions(
           userId,
           submissions,
           feedbackStatus,
+          ...(feedbackUnread
+            ? { note: "Couldn't read this user's feedback, so whether this submission is graded is unknown (feedbackStatus is null)." }
+            : {}),
         });
       } catch (error) {
         return sanitizeError(error);

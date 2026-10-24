@@ -18,6 +18,7 @@ import { checkTopicAvailability } from "./topic-availability.js";
 import {
   validateContentId,
   validateFileType,
+  nameForType,
   MAX_FILE_SIZE,
   DISK_MAX_FILE_SIZE,
 } from "../utils/file-validator.js";
@@ -46,7 +47,7 @@ function tooLargeResponse(bytes: number | null, downloadPath: string | undefined
   // null: the body was cut off at the cap, so its full size is unknown.
   const size = bytes === null ? "over the limit" : `${Math.round(bytes / 1024 / 1024)}MB`;
   return errorResponse(
-    `File too large (${size}). Maximum allowed: ${maxFileSize(downloadPath) / 1024 / 1024}MB.${hint}`
+    `File too large (${size}). Maximum allowed: ${maxFileSize(downloadPath) / 1024 / 1024}MB.${hint}`, "rejectedFile"
   );
 }
 
@@ -246,7 +247,7 @@ async function respondInline(
 
   if (buffer.length > INLINE_MAX_SIZE) {
     return errorResponse(
-      `File too large for inline delivery (${Math.round(buffer.length / 1024 / 1024)}MB, inline max ${INLINE_MAX_SIZE / 1024 / 1024}MB). Provide an absolute downloadPath to save it to disk instead.`
+      `File too large for inline delivery (${Math.round(buffer.length / 1024 / 1024)}MB, inline max ${INLINE_MAX_SIZE / 1024 / 1024}MB). Provide an absolute downloadPath to save it to disk instead.`, "rejectedFile"
     );
   }
 
@@ -254,7 +255,7 @@ async function respondInline(
   // validateFileTypeOfFile internally); inline mode never writes to disk, so it has
   // to call this itself. Throws DownloadError on an unsupported or
   // undetectable type, handled by the caller's sanitizeError.
-  const { mime } = await validateFileType(buffer, undefined, effectiveFilename);
+  const { mime } = await validateFileType(buffer, undefined, effectiveFilename, originalFilename);
 
   const metadata: Record<string, unknown> = {
     mode: "inline",
@@ -385,6 +386,7 @@ async function finishDownload(
   const result = await secureStreamDownload({
     targetDir: downloadPath,
     filename: effectiveFilename,
+    originalFilename,
     body: response.body,
     maxBytes: DISK_MAX_FILE_SIZE,
   });
@@ -402,7 +404,28 @@ async function finishDownload(
     mimeType: result.mime,
     originalFilename,
     message: `File downloaded successfully to ${result.path}`,
+    ...extensionNote(effectiveFilename, result),
   });
+}
+
+/**
+ * When the file was saved under a different extension than requested — a
+ * legacy .xls asked for as "Grades.xlsx" (#280) — say why, so the caller
+ * picks a reader for the format it really is. The saved extension comes from
+ * this package's own legacy Office table, never from the remote name.
+ */
+function extensionNote(
+  requestedFilename: string,
+  saved: { path: string; mime: string }
+): { note?: string } {
+  const savedExt = path.extname(saved.path).toLowerCase();
+  const type = { mime: saved.mime, ext: savedExt.slice(1) };
+  if (nameForType(requestedFilename, type) === requestedFilename) return {};
+  return {
+    note:
+      `Saved with the ${savedExt} extension: this is a legacy Office 97-2003 file (${saved.mime}), ` +
+      `not the format the requested name implied. Open it with an application that reads ${savedExt} files.`,
+  };
 }
 
 /**
@@ -432,11 +455,11 @@ export function registerDownloadFile(
         const fileOptions: FileOptions = { customFilename, pages, pageImages, collapseSlideBuilds };
 
         if (coursePath !== undefined && (topicId !== undefined || folderId !== undefined || newsId !== undefined || fileId !== undefined || source !== undefined)) {
-          return errorResponse("coursePath cannot be combined with topicId, folderId, newsId, fileId, or source.");
+          return errorResponse("coursePath cannot be combined with topicId, folderId, newsId, fileId, or source.", "invalidInput");
         }
 
         if (source !== undefined && (topicId !== undefined || newsId !== undefined || folderId === undefined || fileId === undefined)) {
-          return errorResponse("source requires folderId and fileId and cannot be combined with topicId or newsId.");
+          return errorResponse("source requires folderId and fileId and cannot be combined with topicId or newsId.", "invalidInput");
         }
 
         // Validate courseId
@@ -449,7 +472,7 @@ export function registerDownloadFile(
           // Validate download path is absolute
           if (!path.isAbsolute(downloadPath)) {
             return errorResponse(
-              "Download path must be an absolute path (e.g., /Users/username/Downloads on Mac or C:\\Users\\username\\Downloads on Windows)"
+              "Download path must be an absolute path (e.g., /Users/username/Downloads on Mac or C:\\Users\\username\\Downloads on Windows)", "invalidInput"
             );
           }
 
@@ -458,13 +481,13 @@ export function registerDownloadFile(
             const stats = await fs.stat(downloadPath);
             if (!stats.isDirectory()) {
               return errorResponse(
-                `Download path is not a directory: ${downloadPath}`
+                `Download path is not a directory: ${downloadPath}`, "destination"
               );
             }
           } catch (error: any) {
             if (error?.code === "ENOENT") {
               return errorResponse(
-                `Download directory does not exist: ${downloadPath}`
+                `Download directory does not exist: ${downloadPath}`, "destination"
               );
             }
             throw error;
@@ -473,13 +496,13 @@ export function registerDownloadFile(
 
         // Determine download source
         if (coursePath !== undefined) {
-          if (filePath !== undefined) return errorResponse("coursePath cannot be combined with path.");
+          if (filePath !== undefined) return errorResponse("coursePath cannot be combined with path.", "invalidInput");
           const storePath = parseCoursePath(coursePath, courseId, apiClient.origin);
-          if (typeof storePath !== "string") return errorResponse(storePath.error);
+          if (typeof storePath !== "string") return errorResponse(storePath.error, "invalidInput");
           return await downloadCourseFile(apiClient, courseId, storePath, downloadPath, fileOptions);
         } else if (filePath !== undefined) {
           if (topicId !== undefined || folderId !== undefined || newsId !== undefined || fileId !== undefined) {
-            return errorResponse("path cannot be combined with topicId, folderId, newsId or fileId.");
+            return errorResponse("path cannot be combined with topicId, folderId, newsId or fileId.", "invalidInput");
           }
           return await downloadLinkedCourseFile(apiClient, filePath, downloadPath, fileOptions);
         } else if (topicId !== undefined) {
@@ -518,7 +541,7 @@ export function registerDownloadFile(
           );
         } else {
           return errorResponse(
-            "Either topicId (for content files), coursePath (for course files linked from a module description), path (for a course file linked from a page), both folderId and fileId (for submission files), or both newsId and fileId (for announcement attachments) must be provided"
+            "Either topicId (for content files), coursePath (for course files linked from a module description), path (for a course file linked from a page), both folderId and fileId (for submission files), or both newsId and fileId (for announcement attachments) must be provided", "invalidInput"
           );
         }
       } catch (error) {
@@ -571,7 +594,7 @@ async function downloadCourseFile(
   );
   if (!response) {
     return errorResponse(
-      `Course files are served only to a signed-in Brightspace web session, and there is no valid one: the session cookie is missing or has expired. Sign in again with \`${AUTH_COMMAND}\` and retry. A server that runs on D2L_ACCESS_TOKEN alone has no cookie: set D2L_SESSION_COOKIE as well, or sign in through the browser.`
+      `Course files are served only to a signed-in Brightspace web session, and there is no valid one: the session cookie is missing or has expired. Sign in again with \`${AUTH_COMMAND}\` and retry. A server that runs on D2L_ACCESS_TOKEN alone has no cookie: set D2L_SESSION_COOKIE as well, or sign in through the browser.`, "auth"
     );
   }
 
@@ -603,10 +626,10 @@ async function downloadAssignmentAttachment(
   const raw = await apiClient.get<unknown>(apiClient.le(courseId, "/dropbox/folders/"));
   const folders = Array.isArray(raw) ? raw : (raw as any)?.Objects ?? [];
   const folder = folders.find((candidate: any) => candidate.Id === folderId && candidate.IsHidden !== true);
-  if (!folder) return errorResponse(`No visible assignment with id ${folderId} in course ${courseId}.`);
+  if (!folder) return errorResponse(`No visible assignment with id ${folderId} in course ${courseId}.`, "notFound");
   const attachments = folder.Attachments ?? [];
   const file = attachments.find((candidate: any) => candidate.FileId === fileId);
-  if (!file) return errorResponse(`File ID ${fileId} not found on this assignment. Available files: ${attachments.map((candidate: any) => `${candidate.FileName} (ID: ${candidate.FileId})`).join(", ")}`);
+  if (!file) return errorResponse(`File ID ${fileId} not found on this assignment. Available files: ${attachments.map((candidate: any) => `${candidate.FileName} (ID: ${candidate.FileId})`).join(", ")}`, "notFound");
   if (file.Size > maxFileSize(downloadPath)) return tooLargeResponse(file.Size, downloadPath);
   const response = await apiClient.getRaw(apiClient.le(courseId, `/dropbox/folders/${folderId}/attachments/${fileId}`));
   const filename = parseContentDispositionFilename(response.headers.get("Content-Disposition") ?? "") ?? file.FileName;
@@ -722,7 +745,7 @@ async function downloadSubmissionFile(
 
   if (!submissions || submissions.length === 0) {
     return errorResponse(
-      "No submissions found for this assignment. Upload a submission first."
+      "No submissions found for this assignment. Upload a submission first.", "notFound"
     );
   }
 
@@ -748,7 +771,7 @@ async function downloadSubmissionFile(
   if (!submission || !file) {
     const available = submissions.flatMap((s) => s.Files ?? []);
     return errorResponse(
-      `File ID ${fileId} not found in submission. Available files: ${available.map((f) => `${f.FileName} (ID: ${f.FileId})`).join(", ")}`
+      `File ID ${fileId} not found in submission. Available files: ${available.map((f) => `${f.FileName} (ID: ${f.FileId})`).join(", ")}`, "notFound"
     );
   }
 
@@ -806,7 +829,7 @@ async function downloadNewsAttachment(
 
   if (!file) {
     return errorResponse(
-      `File ID ${fileId} not found on this announcement. Available files: ${attachments.map((f) => `${f.FileName} (ID: ${f.FileId})`).join(", ")}`
+      `File ID ${fileId} not found on this announcement. Available files: ${attachments.map((f) => `${f.FileName} (ID: ${f.FileId})`).join(", ")}`, "notFound"
     );
   }
 
