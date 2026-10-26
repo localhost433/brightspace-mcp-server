@@ -10,7 +10,9 @@ import { devActivity } from "../../src/utils/dev-activity.js";
 
 vi.mock("node:child_process", () => ({ spawn: vi.fn(), execFileSync: vi.fn() }));
 vi.mock("../../src/utils/logger.js", () => ({ log: vi.fn() }));
-vi.mock("../../src/utils/dev-activity.js", () => ({ devActivity: vi.fn() }));
+vi.mock("../../src/utils/dev-activity.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../src/utils/dev-activity.js")>(), devActivity: vi.fn(),
+}));
 
 // Every child a test creates, so afterEach can close the ones a test leaves
 // running. A child that never closes keeps its process "exit" listener.
@@ -116,6 +118,52 @@ describe("AuthRunner", () => {
     expect(spawn).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * Microsoft refuses a new prompt for an account while an earlier one is
+   * still open (UserAuthFailedDuplicateRequest, seen live 2026-10-25), and
+   * shows a "Verify your identity" list instead. The child reports that as
+   * AUTH_MFA_HELD, so callers hear the real wait, not "still starting".
+   */
+  it("answers mfaHeld at once when Microsoft holds the prompt, then upgrades a retry to the number", async () => {
+    const runner = new AuthRunner();
+    const failure = expect(runner.run()).rejects.toMatchObject({ kind: "mfaHeld", numberMatch: undefined });
+    child.stdout.write("AUTH_MFA_HELD\n");
+    await vi.advanceTimersByTimeAsync(1);
+    await failure;
+    const retry = track(runner.run());
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(retry.settled).toBe(false);
+    child.stdout.write("MFA_NUMBER:52\n");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(retry.error).toMatchObject({ kind: "mfaPending", numberMatch: "52" });
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("replaces a hold with a challenge that has no number", async () => {
+    const runner = new AuthRunner();
+    const failure = expect(runner.run()).rejects.toMatchObject({ kind: "mfaHeld" });
+    child.stdout.write("AUTH_MFA_HELD\n");
+    await vi.advanceTimersByTimeAsync(1);
+    await failure;
+    const retry = track(runner.run());
+    await vi.advanceTimersByTimeAsync(1000);
+    child.stdout.write("MFA_PENDING\n");
+    await vi.advanceTimersByTimeAsync(45000);
+    expect(retry.error).toMatchObject({ kind: "mfaPending" });
+  });
+
+  it("reports a sign-in that ran out of time while held as mfaHeld, not unsupported", async () => {
+    const runner = new AuthRunner();
+    const failure = expect(runner.run()).rejects.toMatchObject({ kind: "mfaHeld" });
+    child.stdout.write("AUTH_MFA_HELD\n");
+    await vi.advanceTimersByTimeAsync(1);
+    await failure;
+    const retry = expect(runner.run()).rejects.toMatchObject({ kind: "mfaHeld" });
+    await vi.advanceTimersByTimeAsync(1000);
+    child.emit("close", 4);
+    await retry;
+  });
+
   it("answers automaticPending, not busy, when another process is signing in automatically", async () => {
     const runner = new AuthRunner();
     const failure = expect(runner.run()).rejects.toMatchObject({ kind: "automaticPending" });
@@ -149,20 +197,20 @@ describe("AuthRunner", () => {
 
     it("runs the automatic child headless when no environment override is set", () => {
       delete process.env.D2L_HEADLESS;
-      void new AuthRunner().run().catch(() => {});
+      void new AuthRunner().run().catch(() => { });
 
       expect(vi.mocked(spawn).mock.calls[0][2]?.env?.D2L_HEADLESS).toBe("true");
     });
 
     it("keeps an explicit D2L_HEADLESS=false override for the automatic child", () => {
       process.env.D2L_HEADLESS = "false";
-      void new AuthRunner().run().catch(() => {});
+      void new AuthRunner().run().catch(() => { });
 
       expect(vi.mocked(spawn).mock.calls[0][2]?.env?.D2L_HEADLESS).toBe("false");
     });
 
     it("hides the automatic child's console window on Windows", () => {
-      void new AuthRunner().run().catch(() => {});
+      void new AuthRunner().run().catch(() => { });
 
       expect(vi.mocked(spawn).mock.calls[0][2]).toMatchObject({ windowsHide: true });
     });
@@ -204,7 +252,7 @@ describe("AuthRunner", () => {
     expect(spawn).toHaveBeenCalledTimes(2);
   });
 
-  it.each([[2, "busy"], [3, "cooldown"], [4, "unsupported"], [5, "secureStorage"], [6, "transport"], [1, "failed"], [7, "cooldown"]])(
+  it.each([[2, "busy"], [3, "cooldown"], [4, "unsupported"], [5, "secureStorage"], [6, "transport"], [1, "failed"], [7, "cooldown"], [8, "browserInstall"], [9, "dependencyMissing"]])(
     "preserves child exit %s as a %s error", async (code, kind) => {
       const result = new AuthRunner().run();
       const failure = expect(result).rejects.toMatchObject({ kind });
@@ -485,7 +533,7 @@ describe("AuthRunner", () => {
 
   it("allows five minutes of MFA plus preflight before timing out", async () => {
     const runner = new AuthRunner();
-    void runner.run().catch(() => {});
+    void runner.run().catch(() => { });
     await vi.advanceTimersByTimeAsync(6 * 60000);
     expect(kill).not.toHaveBeenCalled();
     expect(child.kill).not.toHaveBeenCalled();
@@ -544,6 +592,44 @@ describe("AuthRunner", () => {
     });
   });
 
+  describe("recovery correlation", () => {
+    it("joins each of two interleaved recoveries' child to exactly one parent", async () => {
+      const firstChild = child;
+      const secondChild = mockChild();
+      vi.mocked(spawn).mockReturnValueOnce(firstChild as never).mockReturnValueOnce(secondChild as never);
+      const first = new AuthRunner().run();
+      const second = new AuthRunner().run();
+      secondChild.stdout.write("MFA_NUMBER:11\n");
+      firstChild.stdout.write("MFA_NUMBER:22\n");
+      await expect(first).rejects.toMatchObject({ kind: "mfaPending" });
+      await expect(second).rejects.toMatchObject({ kind: "mfaPending" });
+      firstChild.emit("close", 0);
+      secondChild.emit("close", 0);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const childIds = vi.mocked(spawn).mock.calls.map(([, , options]) => options?.env?.D2L_RECOVERY_ID);
+      expect(childIds).toHaveLength(2);
+      expect(childIds[0]).toMatch(/^[0-9a-f-]{36}$/);
+      expect(childIds[1]).toMatch(/^[0-9a-f-]{36}$/);
+      expect(childIds[0]).not.toBe(childIds[1]);
+      for (const recoveryId of childIds) {
+        const parentEvents = vi.mocked(devActivity).mock.calls
+          .filter(([, fields]) => fields?.recoveryId === recoveryId).map(([event]) => event);
+        expect(parentEvents).toEqual(["recovery_started", "mfa_observed", "recovery_finished"]);
+      }
+    });
+
+    it("gives the child a recovery id it cannot inherit from the parent's environment", () => {
+      process.env.D2L_RECOVERY_ID = "00000000-0000-4000-8000-000000000000";
+      try {
+        void new AuthRunner().run().catch(() => {});
+        expect(vi.mocked(spawn).mock.calls[0][2]?.env?.D2L_RECOVERY_ID).not.toBe("00000000-0000-4000-8000-000000000000");
+      } finally {
+        delete process.env.D2L_RECOVERY_ID;
+      }
+    });
+  });
+
   describe("sign-in phase timings", () => {
     it("records each phase the child reports as a dev activity event, not a log line", async () => {
       const result = new AuthRunner().run();
@@ -551,9 +637,10 @@ describe("AuthRunner", () => {
       child.emit("close", 0);
       await result;
 
+      const recoveryId = vi.mocked(spawn).mock.calls[0][2]?.env?.D2L_RECOVERY_ID;
       expect(vi.mocked(devActivity).mock.calls.filter(([event]) => event === "auth_phase")).toEqual([
-        ["auth_phase", { phase: "launch", elapsedMs: 1234 }],
-        ["auth_phase", { phase: "approvalWait", elapsedMs: 20500 }],
+        ["auth_phase", { phase: "launch", elapsedMs: 1234, recoveryId }],
+        ["auth_phase", { phase: "approvalWait", elapsedMs: 20500, recoveryId }],
       ]);
     });
 
@@ -657,7 +744,7 @@ describe("AuthRunner", () => {
       await answerEarly(runner);
       await vi.advanceTimersByTimeAsync(30000);
 
-      void runner.run().catch(() => {});
+      void runner.run().catch(() => { });
       await vi.advanceTimersByTimeAsync(44000);
 
       expect(childTreeStopped()).toBe(false);
@@ -800,7 +887,7 @@ describe("AuthRunner", () => {
   describe("a caller that can be told the challenge mid-call", () => {
     it("tells the caller the number to enter as soon as the challenge appears", async () => {
       const onChallenge = vi.fn();
-      void new AuthRunner().run(onChallenge).catch(() => {});
+      void new AuthRunner().run(onChallenge).catch(() => { });
       child.stdout.write("MFA_NUMBER:47\n");
       await vi.advanceTimersByTimeAsync(0);
 
@@ -809,7 +896,7 @@ describe("AuthRunner", () => {
 
     it("tells the caller a number-less challenge appeared", async () => {
       const onChallenge = vi.fn();
-      void new AuthRunner().run(onChallenge).catch(() => {});
+      void new AuthRunner().run(onChallenge).catch(() => { });
       child.stdout.write("MFA_PENDING\n");
       await vi.advanceTimersByTimeAsync(0);
 
@@ -832,7 +919,7 @@ describe("AuthRunner", () => {
     });
 
     it("answers with the number as soon as a late challenge appears", async () => {
-      const result = new AuthRunner().run(() => {});
+      const result = new AuthRunner().run(() => { });
       const failure = expect(result).rejects.toMatchObject({ kind: "mfaPending", numberMatch: "47" });
       await vi.advanceTimersByTimeAsync(30000);
       child.stdout.write("MFA_NUMBER:47\n");
@@ -842,14 +929,14 @@ describe("AuthRunner", () => {
 
     it("lets the retry wait for the approval and resolve once the sign-in completes", async () => {
       const runner = new AuthRunner();
-      const first = expect(runner.run(() => {})).rejects.toMatchObject({ kind: "mfaPending" });
+      const first = expect(runner.run(() => { })).rejects.toMatchObject({ kind: "mfaPending" });
       child.stdout.write("MFA_NUMBER:47\n");
       await vi.advanceTimersByTimeAsync(0);
       await first;
-    // A real retry comes after the model has answered, past SIBLING_GRACE_MS.
-    await vi.advanceTimersByTimeAsync(2000);
+      // A real retry comes after the model has answered, past SIBLING_GRACE_MS.
+      await vi.advanceTimersByTimeAsync(2000);
 
-      const retry = runner.run(() => {});
+      const retry = runner.run(() => { });
       await vi.advanceTimersByTimeAsync(30000);
       child.emit("close", 0);
 
@@ -858,14 +945,14 @@ describe("AuthRunner", () => {
 
     it("gives the retry the sign-in's own failure when it fails while the retry waits", async () => {
       const runner = new AuthRunner();
-      const first = expect(runner.run(() => {})).rejects.toMatchObject({ kind: "mfaPending" });
+      const first = expect(runner.run(() => { })).rejects.toMatchObject({ kind: "mfaPending" });
       child.stdout.write("MFA_NUMBER:47\n");
       await vi.advanceTimersByTimeAsync(0);
       await first;
-    // A real retry comes after the model has answered, past SIBLING_GRACE_MS.
-    await vi.advanceTimersByTimeAsync(2000);
+      // A real retry comes after the model has answered, past SIBLING_GRACE_MS.
+      await vi.advanceTimersByTimeAsync(2000);
 
-      const retry = expect(runner.run(() => {})).rejects.toMatchObject({ kind: "cooldown" });
+      const retry = expect(runner.run(() => { })).rejects.toMatchObject({ kind: "cooldown" });
       await vi.advanceTimersByTimeAsync(10000);
       child.emit("close", 3);
       await retry;
@@ -907,6 +994,70 @@ describe("AuthRunner", () => {
       await failure;
       await vi.advanceTimersByTimeAsync(0);
       expect(runner.busy()).toBe(false);
+    });
+  });
+
+  // sign_out cancels a sign-in a user missed the prompt for, instead of
+  // leaving every retry to rejoin it until its 5-minute window runs out.
+  describe("cancel()", () => {
+    it("does nothing when no sign-in is running", async () => {
+      expect(await new AuthRunner().cancel()).toBe(false);
+      expect(kill).not.toHaveBeenCalled();
+    });
+
+    it("stops a sign-in waiting on MFA, answers the call polling it at once, and lets the next call start a new one", async () => {
+      const runner = new AuthRunner();
+      const first = expect(runner.run()).rejects.toMatchObject({ kind: "mfaPending", numberMatch: "27" });
+      child.stdout.write("MFA_NUMBER:27\n");
+      await first;
+      await vi.advanceTimersByTimeAsync(2000);
+      const retry = track(runner.run());
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(retry.settled).toBe(false);
+
+      const cancelling = runner.cancel();
+      await vi.advanceTimersByTimeAsync(0);
+      // SIGKILL, never SIGTERM: a graceful stop would record the MFA cooldown.
+      // Windows has no process groups; taskkill /t /f stops the tree instead.
+      if (process.platform === "win32") {
+        expect(execFileSync).toHaveBeenCalledWith("taskkill", ["/pid", "12345", "/t", "/f"], expect.any(Object));
+      } else {
+        expect(kill).toHaveBeenCalledWith(-12345, "SIGKILL");
+        expect(kill).toHaveBeenCalledWith(12346, "SIGKILL");
+      }
+      expect(kill).not.toHaveBeenCalledWith(expect.anything(), "SIGTERM");
+      expect(retry.error).toMatchObject({ kind: "cancelled" });
+      child.emit("exit", null, "SIGKILL");
+      expect(await cancelling).toBe(true);
+      expect(runner.busy()).toBe(false);
+
+      const next = mockChild();
+      vi.mocked(spawn).mockReturnValue(next as never);
+      const fresh = expect(runner.run()).rejects.toMatchObject({ kind: "mfaPending", numberMatch: "81" });
+      next.stdout.write("MFA_NUMBER:81\n");
+      await fresh;
+      expect(spawn).toHaveBeenCalledTimes(2);
+    });
+
+    it("answers a call still waiting for the sign-in to reach MFA", async () => {
+      const runner = new AuthRunner();
+      const waiting = expect(runner.run()).rejects.toMatchObject({ kind: "cancelled" });
+      const cancelling = runner.cancel();
+      child.emit("exit", null, "SIGKILL");
+      await waiting;
+      expect(await cancelling).toBe(true);
+    });
+
+    it("answers cancelled when another process killed the sign-in child", async () => {
+      const runner = new AuthRunner();
+      const first = expect(runner.run()).rejects.toMatchObject({ kind: "mfaPending" });
+      child.stdout.write("MFA_NUMBER:27\n");
+      await first;
+      await vi.advanceTimersByTimeAsync(2000);
+      const retry = expect(runner.run()).rejects.toMatchObject({ kind: "cancelled" });
+      await vi.advanceTimersByTimeAsync(1000);
+      child.emit("close", null, "SIGKILL");
+      await retry;
     });
   });
 });

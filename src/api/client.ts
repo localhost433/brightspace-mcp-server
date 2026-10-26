@@ -9,7 +9,7 @@ import { DEFAULT_CACHE_TTLS } from "./types.js";
 import { TTLCache } from "./cache.js";
 import { TokenBucket } from "./rate-limiter.js";
 import { discoverVersions } from "./version-discovery.js";
-import { ApiError, RateLimitError, NetworkError } from "./errors.js";
+import { ApiError, CredentialRejectedError, RateLimitError, NetworkError } from "./errors.js";
 import {
   withRetry,
   isRetryableFailure,
@@ -19,7 +19,7 @@ import {
 } from "./retry.js";
 import { log } from "../utils/logger.js";
 import { AUTH_COMMAND } from "../utils/commands.js";
-import { devActivity } from "../utils/dev-activity.js";
+import { devActivity, httpOperation } from "../utils/dev-activity.js";
 
 /**
  * True when a followed redirect ended on this Brightspace's sign-in page. A
@@ -491,8 +491,8 @@ export class D2LApiClient {
   }
 
   /** Buckets one observed HTTP status into statsData.statusClasses. */
-  private recordStatus(status: number): void {
-    devActivity("http_response", { status });
+  private recordStatus(status: number, path: string): void {
+    devActivity("http_response", { status, operation: httpOperation(path) });
     const classes = this.statsData.statusClasses;
     if (status >= 200 && status < 300) classes["2xx"]++;
     else if (status === 401) classes["401"]++;
@@ -536,7 +536,8 @@ export class D2LApiClient {
       }
       log("WARN", "Auto-reauthentication did not produce a valid token");
     }
-    throw new ApiError(401, path, this.authExpiredMessage ?? `Session expired. Please re-authenticate via ${AUTH_COMMAND}.`);
+    if (this.authExpiredMessage) throw new CredentialRejectedError(path, this.authExpiredMessage);
+    throw new ApiError(401, path, `Session expired. Please re-authenticate via ${AUTH_COMMAND}.`);
   }
 
   /**
@@ -557,7 +558,7 @@ export class D2LApiClient {
         headers,
         signal: AbortSignal.timeout(this.timeoutMs),
       });
-      this.recordStatus(response.status);
+      this.recordStatus(response.status, path);
 
       // Preserve cookie material: a 401 only rejects this access token.
       if (response.status === 401) {
@@ -650,7 +651,7 @@ export class D2LApiClient {
         headers,
         signal: idle.signal,
       });
-      this.recordStatus(response.status);
+      this.recordStatus(response.status, path);
 
       // Preserve cookie material for the shared HTTP refresh path.
       if (response.status === 401) {

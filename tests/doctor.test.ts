@@ -5,6 +5,7 @@ import { TokenManager } from "../src/auth/token-manager.js";
 import { SessionStore } from "../src/auth/session-store.js";
 import { AuthenticationInProgressError } from "../src/auth/auth-lock.js";
 import type { TokenData } from "../src/types/index.js";
+import { ApiError } from "../src/api/errors.js";
 
 /**
  * doctor is a beginner-facing diagnostic: one line per check, a plain-English
@@ -574,17 +575,24 @@ describe("doctor: an install prepare got ready", () => {
 });
 
 describe("doctor: Chromium", () => {
-  it("fails with the prepare command when a browser sign-in needs is missing", async () => {
+  it("fails with the installation-scoped repair command when Chromium is missing", async () => {
     const result = await runDoctorChecks(deps({ chromiumStatus: async () => ({ headless: "missing", visible: true }) }));
     const check = idOf(result, "browser");
     expect(check.ok).toBe(false);
-    expect(check.line).toContain(`${SETUP_COMMAND} --prepare`);
+    expect(check.line).toContain(" repair");
+    expect(check.line).not.toContain("npx");
     expect(result.allOk).toBe(false);
   });
 
-  it("passes when a test launch was blocked for another reason but both browsers exist", async () => {
+  it("does not claim health when a test launch was blocked", async () => {
     const result = await runDoctorChecks(deps({ chromiumStatus: async () => ({ headless: "unknown", visible: true, detail: "sandbox" }) }));
-    expect(idOf(result, "browser").ok).toBe(true);
+    expect(idOf(result, "browser").ok).toBe(false);
+  });
+
+  it("distinguishes deleted Playwright code from deleted browser downloads", async () => {
+    const result = await runDoctorChecks(deps({ chromiumStatus: async () => ({ headless: "dependency_missing", visible: false }) }));
+    expect(idOf(result, "browser").line).toContain("npm ci --prefix");
+    expect(idOf(result, "browser").line).not.toContain("sign-in can't start");
   });
 
   it("doesn't require Chromium when an environment credential signs in", async () => {
@@ -598,5 +606,49 @@ describe("doctor: Chromium", () => {
   it("reports a check that throws as a problem, not a crash", async () => {
     const result = await runDoctorChecks(deps({ chromiumStatus: async () => { throw new Error("boom"); } }));
     expect(idOf(result, "browser").ok).toBe(false);
+  });
+});
+
+// A pasted credential is not "issued" by a sign-in, and when Brightspace
+// refuses it the fix is to paste a fresh one, not to check the connection.
+describe("doctor: a pasted credential Brightspace rejects", () => {
+  const refused = async (): Promise<never> => {
+    throw new ApiError(401, "/d2l/api/lp/1.50/enrollments/myenrollments/", "Session expired. Please re-authenticate via npx -y brightspace-mcp-server@latest auth.");
+  };
+
+  it.each([
+    ["D2L_SESSION_COOKIE", "d2lSessionVal=a;d2lSecureSessionVal=b", "Copy a fresh d2lSessionVal/d2lSecureSessionVal pair"],
+    ["D2L_ACCESS_TOKEN", "a-token", "Issue a fresh token"],
+  ])("%s: names the variable and says to replace it", async (name, value, fix) => {
+    const result = await runDoctorChecks(
+      deps({ env: { D2L_BASE_URL: "https://school.example", [name]: value }, countCourses: refused }),
+    );
+    expect(idOf(result, "session").line).not.toContain("a token was issued");
+    expect(idOf(result, "session").line).toContain(name);
+    const courses = idOf(result, "courses");
+    expect(courses.ok).toBe(false);
+    expect(courses.line).toContain(name);
+    expect(courses.line).toContain(fix);
+    expect(courses.line).not.toContain("checking your connection");
+    expect(courses.line).not.toContain(AUTH_COMMAND);
+  });
+
+  it("with both variables set, names D2L_ACCESS_TOKEN, which is the one signing in", async () => {
+    const result = await runDoctorChecks(
+      deps({
+        env: { D2L_BASE_URL: "https://school.example", D2L_ACCESS_TOKEN: "a-token", D2L_SESSION_COOKIE: "d2lSessionVal=a;d2lSecureSessionVal=b" },
+        countCourses: refused,
+      }),
+    );
+    expect(idOf(result, "courses").line).toContain("Issue a fresh token");
+    expect(idOf(result, "session").line).toContain("D2L_ACCESS_TOKEN");
+  });
+
+  it("without a pasted credential, a refused saved sign-in says to sign in again, not to check the connection", async () => {
+    const result = await runDoctorChecks(deps({ countCourses: refused }));
+    const courses = idOf(result, "courses");
+    expect(courses.ok).toBe(false);
+    expect(courses.line).toContain(AUTH_COMMAND);
+    expect(courses.line).not.toContain("checking your connection");
   });
 });

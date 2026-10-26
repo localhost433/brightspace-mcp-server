@@ -4,7 +4,7 @@ import * as os from "node:os";
 import { spawn } from "node:child_process";
 import { TokenManager } from "../../src/auth/token-manager.js";
 import { D2LApiClient } from "../../src/api/client.js";
-import { ApiError } from "../../src/api/errors.js";
+import { ApiError, CredentialRejectedError } from "../../src/api/errors.js";
 import { AuthRunner } from "../../src/auth/auth-runner.js";
 
 // D2L_ACCESS_TOKEN / D2L_SESSION_COOKIE never touch disk, so no SessionStore
@@ -62,6 +62,13 @@ describe("TokenManager — D2L_ACCESS_TOKEN / D2L_SESSION_COOKIE", () => {
 
       expect(token?.accessToken).toBe("my-admin-token");
       expect(token?.source).toBe("env");
+      // Course files are web pages, which take only the cookie.
+      expect(token?.cookieHeader).toBe("d2lSessionVal=aaa; d2lSecureSessionVal=bbb");
+    });
+
+    it("carries no cookie when D2L_ACCESS_TOKEN is set alone", async () => {
+      const manager = new TokenManager({ sessionDir: testDir, baseUrl: BASE_URL, envAccessToken: "my-admin-token" });
+      expect((await manager.getToken())?.cookieHeader).toBeUndefined();
     });
   });
 
@@ -82,6 +89,128 @@ describe("TokenManager — D2L_ACCESS_TOKEN / D2L_SESSION_COOKIE", () => {
       const retried = await manager.getToken(token!.accessToken);
 
       expect(retried).toBeNull();
+    });
+  });
+
+  describe("D2L_SESSION_COOKIE with mintEnvCookie", () => {
+    const COOKIE = "d2lSessionVal=aaa; d2lSecureSessionVal=bbb";
+
+    const makeManager = (
+      fetchXsrf: ReturnType<typeof vi.fn>,
+      mint: ReturnType<typeof vi.fn>,
+    ) =>
+      new TokenManager({
+        sessionDir: testDir,
+        baseUrl: BASE_URL,
+        envSessionCookie: COOKIE,
+        mintEnvCookie: true,
+        fetchXsrf: fetchXsrf as never,
+        mint: mint as never,
+      });
+
+    it("trades the cookie for a Bearer JWT using the XSRF token read off the home page", async () => {
+      const fetchXsrf = vi.fn(async () => ({ ok: true as const, csrfToken: "xsrf-1" }));
+      const mint = vi.fn(async () => ({ ok: true as const, accessToken: "minted-jwt" }));
+      const manager = makeManager(fetchXsrf, mint);
+
+      const token = await manager.getToken();
+
+      expect(token).toMatchObject({ accessToken: "minted-jwt", source: "env", cookieHeader: COOKIE, tenantOrigin: BASE_URL });
+      expect(mint).toHaveBeenCalledWith({ baseUrl: BASE_URL, cookieHeader: COOKIE, csrfToken: "xsrf-1" });
+    });
+
+    it("serves the minted JWT from memory until it is rejected, then mints again", async () => {
+      const fetchXsrf = vi.fn(async () => ({ ok: true as const, csrfToken: "xsrf-1" }));
+      const mint = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, accessToken: "jwt-1" })
+        .mockResolvedValueOnce({ ok: true, accessToken: "jwt-2" });
+      const manager = makeManager(fetchXsrf, mint);
+
+      expect((await manager.getToken())?.accessToken).toBe("jwt-1");
+      expect((await manager.getToken())?.accessToken).toBe("jwt-1");
+      expect((await manager.getToken("jwt-1"))?.accessToken).toBe("jwt-2");
+      expect(mint).toHaveBeenCalledTimes(2);
+      // The XSRF token that worked is reused instead of fetching the page again.
+      expect(fetchXsrf).toHaveBeenCalledTimes(1);
+    });
+
+    it("shares one mint between concurrent callers", async () => {
+      const fetchXsrf = vi.fn(async () => ({ ok: true as const, csrfToken: "xsrf-1" }));
+      const mint = vi.fn(async () => ({ ok: true as const, accessToken: "minted-jwt" }));
+      const manager = makeManager(fetchXsrf, mint);
+
+      const [a, b] = await Promise.all([manager.getToken(), manager.getToken()]);
+
+      expect(a?.accessToken).toBe("minted-jwt");
+      expect(b?.accessToken).toBe("minted-jwt");
+      expect(mint).toHaveBeenCalledTimes(1);
+    });
+
+    it("falls back to the cookie passthrough, and stops trying, when the page has no XSRF token", async () => {
+      const fetchXsrf = vi.fn(async () => ({ ok: false as const, reason: "notFound" as const }));
+      const mint = vi.fn();
+      const manager = makeManager(fetchXsrf, mint);
+
+      expect((await manager.getToken())?.accessToken).toBe(`cookie:${COOKIE}`);
+      expect((await manager.getToken())?.accessToken).toBe(`cookie:${COOKIE}`);
+      expect(fetchXsrf).toHaveBeenCalledTimes(1);
+      expect(mint).not.toHaveBeenCalled();
+    });
+
+    it("keeps the paste-a-fresh-one path for a dead cookie", async () => {
+      const fetchXsrf = vi.fn(async () => ({ ok: false as const, reason: "sessionExpired" as const }));
+      const manager = makeManager(fetchXsrf, vi.fn());
+
+      const token = await manager.getToken();
+      expect(token?.accessToken).toBe(`cookie:${COOKIE}`);
+      expect(await manager.getToken(token!.accessToken)).toBeNull();
+    });
+
+    it("falls back to the cookie when the mint refuses, and retries after a transport failure", async () => {
+      vi.useFakeTimers();
+      try {
+        const fetchXsrf = vi.fn(async () => ({ ok: true as const, csrfToken: "xsrf-1" }));
+        const mint = vi
+          .fn()
+          .mockResolvedValueOnce({ ok: false, reason: "transport", detail: "HTTP 403" })
+          .mockResolvedValueOnce({ ok: true, accessToken: "minted-jwt" });
+        const manager = makeManager(fetchXsrf, mint);
+
+        expect((await manager.getToken())?.accessToken).toBe(`cookie:${COOKIE}`);
+        expect((await manager.getToken())?.accessToken).toBe(`cookie:${COOKIE}`);
+        expect(mint).toHaveBeenCalledTimes(1);
+
+        vi.advanceTimersByTime(61_000);
+        expect((await manager.getToken())?.accessToken).toBe("minted-jwt");
+        // The refused XSRF token was dropped, so a fresh one was read.
+        expect(fetchXsrf).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("is off by default, so read-only callers make no requests", async () => {
+      const fetchXsrf = vi.fn();
+      const manager = new TokenManager({ sessionDir: testDir, baseUrl: BASE_URL, envSessionCookie: COOKIE, fetchXsrf: fetchXsrf as never });
+
+      expect((await manager.getToken())?.accessToken).toBe(`cookie:${COOKIE}`);
+      expect(fetchXsrf).not.toHaveBeenCalled();
+    });
+
+    it("never mints when D2L_ACCESS_TOKEN is also set", async () => {
+      const fetchXsrf = vi.fn();
+      const manager = new TokenManager({
+        sessionDir: testDir,
+        baseUrl: BASE_URL,
+        envAccessToken: "my-admin-token",
+        envSessionCookie: COOKIE,
+        mintEnvCookie: true,
+        fetchXsrf: fetchXsrf as never,
+      });
+
+      expect((await manager.getToken())?.accessToken).toBe("my-admin-token");
+      expect(fetchXsrf).not.toHaveBeenCalled();
     });
   });
 
@@ -148,6 +277,7 @@ describe("TokenManager — D2L_ACCESS_TOKEN / D2L_SESSION_COOKIE", () => {
         status: 401,
         message: expect.stringContaining("paste a fresh one"),
       } as Partial<ApiError>);
+      await expect(client.get("/d2l/api/lp/1.56/users/whoami")).rejects.toBeInstanceOf(CredentialRejectedError);
 
       expect(spawn).not.toHaveBeenCalled();
     });
@@ -181,6 +311,7 @@ describe("TokenManager — D2L_ACCESS_TOKEN / D2L_SESSION_COOKIE", () => {
         status: 401,
         message: expect.stringContaining("expired or invalid"),
       } as Partial<ApiError>);
+      await expect(client.get("/d2l/api/lp/1.56/users/whoami")).rejects.toBeInstanceOf(CredentialRejectedError);
 
       expect(spawn).not.toHaveBeenCalled();
     });

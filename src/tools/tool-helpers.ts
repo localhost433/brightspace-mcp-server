@@ -7,10 +7,11 @@
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { ZodError } from "zod";
 import { ApiError, RateLimitError, NetworkError } from "../api/index.js";
-import { TokenRefreshError } from "../api/errors.js";
+import { CredentialRejectedError, TokenRefreshError } from "../api/errors.js";
 import { AuthProcessError, type AuthFailureKind } from "../auth/auth-runner.js";
 import { log } from "../utils/logger.js";
 import { AUTH_COMMAND } from "../utils/commands.js";
+import { dependencyRepairHint, PLAYWRIGHT_INSTALL_HINT } from "../utils/browser-install.js";
 import { getUpdateNotice } from "../utils/update-checker.js";
 import { mfaShortcutTip } from "../utils/two-factor-shortcuts.js";
 import {
@@ -106,12 +107,43 @@ const MFA_SOLO_CALL =
   "Don't run other Brightspace calls in parallel until the sign-in completes: a batched " +
   "answer can reach the user too late to approve. Make one call at a time.";
 
+/**
+ * What a retry does to the prompt on the user's phone. Without this a model
+ * filled the gap itself, telling a user that a call timing out would make the
+ * server send a new push: the retry joins the background sign-in instead, and
+ * only a sign-in that is cancelled (sign_out) or left alone for ABANDON_MS
+ * (auth-runner.ts) is replaced.
+ */
+const MFA_SAME_PROMPT =
+  "Calling again doesn't send a new prompt, and neither does a call timing out: the sign-in " +
+  "keeps waiting, for up to 5 minutes, on the prompt already sent.";
+
+/** Entra number match only: purdue-sso.ts asks for another request when one expires or is denied. */
+const MFA_NEW_NUMBER =
+  "If Microsoft's number expires or is denied, the sign-in asks Microsoft for a new one by itself " +
+  "and the next answer shows it; always give the user the latest number.";
+
+/**
+ * Why a missed prompt cannot be skipped. Microsoft keeps a prompt open for up
+ * to 5 minutes and refuses another for the same account until then
+ * (UserAuthFailedDuplicateRequest, seen live on Purdue's tenant 2026-10-25),
+ * so cancelling the sign-in only throws away the one that could finish.
+ */
+const MFA_NO_FASTER =
+  "Cancelling the sign-in (sign_out) doesn't get one sooner: Microsoft sends no other prompt to " +
+  "this account until the one already sent expires, up to 5 minutes after it was sent.";
+
 const AUTH_FAILURE_GUIDANCE: Record<AuthFailureKind, string> = {
+  browserInstall: PLAYWRIGHT_INSTALL_HINT,
+  dependencyMissing: dependencyRepairHint(),
   busy: "A sign-in is already running in another process. Let it finish, then try again, " +
     `or run \`${AUTH_COMMAND}\` in a terminal to take over that background attempt.`,
   cooldown:
-    "Automatic sign-in is paused because an MFA prompt went unanswered. " +
-    `Run \`${AUTH_COMMAND}\` in a terminal (from your home folder) to retry now and see the number to enter.`,
+    "Automatic sign-in is paused because an MFA prompt went unanswered; the pause ends 5 minutes " +
+    "after that prompt was missed. Until then " +
+    "calls send no prompt and return this message; after that, the next call starts a new sign-in " +
+    "and sends a new prompt. " +
+    `To sign in now, run \`${AUTH_COMMAND}\` in a terminal (from your home folder); it shows the number to enter.`,
   unsupported:
     "This login needs something your AI client cannot supply, usually a code from an "
     + "authenticator app. " +
@@ -123,7 +155,8 @@ const AUTH_FAILURE_GUIDANCE: Record<AuthFailureKind, string> = {
     "Brightspace could not be reached to sign in. The saved session was kept. " +
     "Check your connection and try again in a few minutes.",
   timeout:
-    "The sign-in did not finish in time, usually a missed MFA prompt. " +
+    "The sign-in did not finish in time, usually a missed MFA prompt, and has stopped: the prompt it " +
+    "sent no longer works. The next call starts a new sign-in, or says automatic sign-in is paused. " +
     `Run \`${AUTH_COMMAND}\` in a terminal (from your home folder) to complete it with the number visible.`,
   failed:
     `The sign-in did not complete. Run \`${AUTH_COMMAND}\` in a terminal (from your home folder) to see why, ` +
@@ -140,12 +173,25 @@ const AUTH_FAILURE_GUIDANCE: Record<AuthFailureKind, string> = {
     "again right away without waiting for them to " +
     "confirm: each call waits up to 45 seconds for the approval and returns the result as soon " +
     "as the sign-in completes. Keep calling until it succeeds or reports a different error. " +
-    MFA_SOLO_CALL,
+    `${MFA_SAME_PROMPT} ${MFA_NO_FASTER} ${MFA_SOLO_CALL}`,
+  cancelled:
+    "The sign-in was cancelled before it finished (by sign_out, or its process was stopped), so " +
+    "the prompt or number from it no longer works. Calling this tool again starts a new sign-in. " +
+    "Microsoft keeps the cancelled prompt open for up to 5 minutes after sending it and sends this " +
+    "account no other until then, so a new number can take that long; give the user the new number " +
+    "when an answer carries one.",
+  mfaHeld:
+    "Microsoft is still holding an earlier sign-in prompt for this account (one that was missed, or " +
+    "whose sign-in was cancelled) and won't send a new prompt until that one expires, up to 5 minutes " +
+    "after it was sent. There is nothing to approve right now, and the earlier number no longer works. " +
+    "The sign-in asks Microsoft again every minute. Tell the user that, then call this tool again " +
+    "right away: each call waits up to 45 seconds and returns the new number as soon as Microsoft " +
+    "sends it. If a prompt the user didn't start shows on their phone, they should deny it.",
   inProgress:
     "Brightspace sign-in is still starting in the background (opening the browser and the " +
     "school's login pages). Call this tool again right away: the next call picks up that " +
-    "sign-in and returns the number to approve as soon as one appears. Don't ask the user to " +
-    "do anything yet.",
+    "sign-in and returns the number to approve as soon as one appears. No prompt has been sent " +
+    "yet, and calling again doesn't start a second sign-in. Don't ask the user to do anything yet.",
 };
 
 /**
@@ -191,7 +237,7 @@ function mfaPendingMessage(error: AuthProcessError): string {
       "tool again right away without waiting for them " +
       "to confirm: each call waits up to 45 seconds for the approval and returns the result as " +
       "soon as the sign-in completes. Keep calling until it succeeds or reports a different error. " +
-      MFA_SOLO_CALL;
+      `${MFA_SAME_PROMPT} ${MFA_NEW_NUMBER} ${MFA_NO_FASTER} ${MFA_SOLO_CALL}`;
   }
   return AUTH_FAILURE_GUIDANCE[error.kind];
 }
@@ -260,6 +306,16 @@ export function authPendingNotice(error: unknown): string {
 }
 
 /**
+ * A rejected pasted credential (D2L_ACCESS_TOKEN or D2L_SESSION_COOKIE) never
+ * recovers by waiting, unlike a pending sign-in. Tools call this before
+ * reporting "sign-in is still in progress", so the whole call fails instead
+ * and sanitizeError tells the user how to replace the credential.
+ */
+export function throwIfCredentialRejected(error: unknown): void {
+  if (error instanceof CredentialRejectedError) throw error;
+}
+
+/**
  * Sanitize errors for user-friendly messages
  *
  * SECURITY: Never include stack traces, raw API responses, or token values
@@ -309,6 +365,9 @@ function describeError(error: unknown): CallToolResult {
       return errorResponse(
         "Resource not found. The course or item may not exist, or you may not have access."
       );
+    }
+    if (error instanceof CredentialRejectedError) {
+      return errorResponse(error.guidance);
     }
     if (error.status === 401) {
       // A stale install is a common cause of sign-in failing, so this is the

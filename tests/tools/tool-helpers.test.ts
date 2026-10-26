@@ -6,14 +6,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProcessError, type AuthFailureKind } from "../../src/auth/auth-runner.js";
-import { ApiError, NetworkError, RateLimitError, TokenRefreshError } from "../../src/api/errors.js";
+import { ApiError, CredentialRejectedError, NetworkError, RateLimitError, TokenRefreshError } from "../../src/api/errors.js";
 import { DownloadError } from "../../src/utils/download-errors.js";
 
 vi.mock("../../src/utils/logger.js", () => ({ log: vi.fn() }));
 vi.mock("../../src/utils/update-checker.js", () => ({ getUpdateNotice: vi.fn(() => null) }));
 
 const { getUpdateNotice } = await import("../../src/utils/update-checker.js");
-const { sanitizeError, toolResponse, errorResponse } = await import("../../src/tools/tool-helpers.js");
+const { sanitizeError, toolResponse, errorResponse, authPendingNotice, throwIfCredentialRejected } = await import("../../src/tools/tool-helpers.js");
 const {
   SHORTCUTS_DOCS_URL, mfaShortcutTip, resetActiveShortcuts, setActiveShortcuts,
 } = await import("../../src/utils/two-factor-shortcuts.js");
@@ -79,6 +79,7 @@ describe("sanitizeError", () => {
     // than send them looking for an approval that will never arrive.
     ["automaticPending", "No phone approval is being requested"],
     ["inProgress", "still starting in the background"],
+    ["cancelled", "Calling this tool again starts a new sign-in"],
   ];
 
   it.each(expectedGuidance)("explains a %s sign-in failure", (kind, expected) => {
@@ -106,6 +107,46 @@ describe("sanitizeError", () => {
     expect(textOf(result)).toContain("45 seconds");
     // Claude Desktop hides tool results, so the number has to reach the user as reply text.
     expect(textOf(result)).toContain("before you make any other tool call");
+  });
+
+  // A model once told a user that a call timing out would make the server send
+  // a new push. A retry joins the waiting sign-in, so the text has to say what a
+  // retry does to the prompt. Live on Purdue's tenant (2026-10-25), cancelling
+  // the sign-in did not get a new prompt sooner either: Microsoft refused
+  // another push to the account (UserAuthFailedDuplicateRequest) until the
+  // first expired, so the text must not offer that.
+  it.each([undefined, "47"])("says a retry sends no new prompt and a cancel gets none sooner (number: %s)", (numberMatch) => {
+    const text = textOf(sanitizeError(new AuthProcessError("mfaPending", "internal detail", numberMatch)));
+
+    expect(text).toContain("Calling again doesn't send a new prompt, and neither does a call timing out");
+    expect(text).toContain("Cancelling the sign-in (sign_out) doesn't get one sooner");
+    expect(text).not.toContain("offer to cancel");
+    expect(text).not.toContain("new prompt right away");
+  });
+
+  it("explains Microsoft holding back a new prompt instead of 'still starting' or 'cannot supply'", () => {
+    const text = textOf(sanitizeError(new AuthProcessError("mfaHeld", "internal detail")));
+
+    expect(text).toContain("Microsoft is still holding an earlier sign-in prompt for this account");
+    expect(text).toContain("up to 5 minutes");
+    expect(text).toContain("nothing to approve right now");
+    expect(text).toContain("call this tool again right away");
+    expect(text).toContain("If a prompt the user didn't start shows on their phone, they should deny it");
+    expect(text).not.toMatch(/still starting|cannot supply|in a terminal/);
+  });
+
+  // Only Entra number match is re-requested (purdue-sso.ts); a Duo push is not.
+  it("mentions a re-issued number only when there is a number", () => {
+    const withNumber = textOf(sanitizeError(new AuthProcessError("mfaPending", "internal detail", "47")));
+    const withoutNumber = textOf(sanitizeError(new AuthProcessError("mfaPending", "internal detail")));
+
+    expect(withNumber).toContain("asks Microsoft for a new one by itself");
+    expect(withoutNumber).not.toContain("asks Microsoft for a new one");
+  });
+
+  it("says no prompt goes out during the cooldown or before a sign-in reaches MFA", () => {
+    expect(textOf(sanitizeError(new AuthProcessError("cooldown", "x")))).toContain("calls send no prompt");
+    expect(textOf(sanitizeError(new AuthProcessError("inProgress", "x")))).toContain("No prompt has been sent yet");
   });
 
   // Issue #199: a client that runs calls in a parallel batch can hold the
@@ -159,6 +200,14 @@ describe("sanitizeError", () => {
       expect(textOf(sanitizeError(duplicate))).not.toContain(SHORTCUTS_DOCS_URL);
       expect(textOf(sanitizeError(new AuthProcessError("timeout", "x")))).not.toContain(SHORTCUTS_DOCS_URL);
     });
+  });
+
+  it("keeps installation failures distinct from credential or MFA failures", () => {
+    expect(textOf(sanitizeError(new AuthProcessError("browserInstall", "private diagnostic")))).toContain(" repair");
+    const dependency = textOf(sanitizeError(new AuthProcessError("dependencyMissing", "private diagnostic")));
+    expect(dependency).toContain("npm ci --prefix");
+    expect(dependency).not.toContain("private diagnostic");
+    expect(dependency).not.toContain("saved school or username");
   });
 
   it("never repeats the raw failure text back to the caller", () => {
@@ -226,5 +275,28 @@ describe("sanitizeError: download failures (issue #24)", () => {
       expect(text).not.toContain("An unexpected error occurred");
       expect(text).not.toContain("undefined");
     }
+  });
+});
+
+describe("a rejected pasted credential", () => {
+  const guidance = "The pasted D2L_SESSION_COOKIE has expired. Copy a fresh pair and update the environment variable.";
+
+  it("sanitizeError shows how to replace the credential instead of the auth command", () => {
+    const result = sanitizeError(new CredentialRejectedError("/d2l/api/lp/1.56/users/whoami", guidance));
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).toBe(guidance);
+  });
+
+  it("throwIfCredentialRejected rethrows only a rejected pasted credential", () => {
+    const rejected = new CredentialRejectedError("/x", guidance);
+    expect(() => throwIfCredentialRejected(rejected)).toThrow(rejected);
+    expect(() => throwIfCredentialRejected(new ApiError(401, "/x", "Session expired"))).not.toThrow();
+    expect(() => throwIfCredentialRejected(new TokenRefreshError("down"))).not.toThrow();
+  });
+
+  it("an ordinary 401 still points at the auth command", () => {
+    const text = (sanitizeError(new ApiError(401, "/x", "Session expired")).content[0] as { text: string }).text;
+    expect(text).toContain("Auto-reauthentication was attempted but failed");
+    expect(authPendingNotice(new ApiError(401, "/x", "Session expired"))).toContain("in your terminal");
   });
 });

@@ -7,7 +7,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { D2LApiClient, ApiError, DEFAULT_CACHE_TTLS } from "../api/index.js";
 import { GetSyllabusSchema } from "./schemas.js";
-import { toolResponse, sanitizeError, errorResponse } from "./tool-helpers.js";
+import { toolResponse, sanitizeError, errorResponse, isAuthUnavailable } from "./tool-helpers.js";
 import { convertHtmlToMarkdown } from "../utils/html-converter.js";
 import { stripD2lSessionParams } from "../utils/session-params.js";
 import { secureDownload, readBodyCapped } from "../utils/download-helpers.js";
@@ -109,9 +109,12 @@ async function tryLookup<T>(lookup: DiscoveryLookup, fetch: () => Promise<T>): P
   try {
     return { ok: true, value: await fetch() };
   } catch (error) {
+    // A pending or refused sign-in is not a permission the student lacks:
+    // the lookup never ran, so the call fails with the sign-in's answer.
+    if (isAuthUnavailable(error)) throw error;
     log("DEBUG", `get_syllabus: could not read ${LOOKUP_LABELS[lookup]}`, error);
     if (error instanceof ApiError) {
-      const forbidden = error.status === 401 || error.status === 403;
+      const forbidden = error.status === 403;
       return {
         ok: false,
         unavailable: { lookup, reason: forbidden ? "permission-denied" : "request-failed", status: error.status },
@@ -193,7 +196,7 @@ export function registerGetSyllabus(
     {
       title: "Get Course Syllabus",
       description:
-        "Fetch the syllabus/overview text and optional attachment for a course. Returns the course overview description as markdown. When the Overview is empty, finds the syllabus posted as course content (a topic titled syllabus, or the topics in a Syllabus module) and returns it as contentSyllabus: its source topic, its extracted text when readable (files, HTML pages, public Google Docs), and any other candidates. When the syllabus lives in an external LTI tool (e.g. Simple Syllabus), lists those sources in externalSyllabusSources; their contents cannot be read. If some of those lookups could not be completed (e.g. permission denied), externalSyllabusDiscovery says which, and an empty result is then not proof the course has no syllabus. If downloadPath is provided, also downloads the syllabus attachment (e.g. PDF). IMPORTANT: You MUST ask the user where they want to save the file before calling this tool with a downloadPath.",
+        "Fetch the syllabus/overview text and optional attachment for a course. Returns the course overview description as markdown. When the Overview is empty, finds the syllabus posted as course content (a topic titled syllabus, or the topics in a Syllabus module) and returns it as contentSyllabus: its source topic, its extracted text when readable (files, HTML pages, public Google Docs), and any other candidates. When the syllabus lives in an external LTI tool (e.g. Simple Syllabus), lists those sources in externalSyllabusSources; their contents cannot be read. If some of those lookups could not be completed (e.g. permission denied), externalSyllabusDiscovery says which, and an empty result is then not proof the course has no syllabus. If downloadPath is provided, also downloads the syllabus attachment (e.g. PDF); the directory must already exist, since it is not created for you. IMPORTANT: You MUST ask the user where they want to save the file before calling this tool with a downloadPath.",
       inputSchema: GetSyllabusSchema,
     },
     async (args: any) => {
@@ -219,7 +222,7 @@ export function registerGetSyllabus(
           } catch (error: any) {
             if (error?.code === "ENOENT") {
               return errorResponse(
-                `Download directory does not exist: ${downloadPath}`, "destination"
+                `Download directory does not exist: ${downloadPath}. Create it, then retry, or choose an existing directory.`, "destination"
               );
             }
             throw error;
