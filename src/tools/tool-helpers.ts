@@ -38,6 +38,16 @@ export function withUpdateNotice(content: CallToolResult["content"]): CallToolRe
 }
 
 /**
+ * A plain-text answer, as the sign-in tools give: prose a model relays to the
+ * user, not a JSON envelope to read fields out of. Carries the update notice
+ * like every other response.
+ */
+export function textResponse(message: string, isError = false): CallToolResult {
+  const result = withUpdateNotice([{ type: "text", text: message }]);
+  return isError ? { ...result, isError: true } : result;
+}
+
+/**
  * Wrap data as MCP-compatible tool result.
  *
  * Every tool returns through here, which makes it the one place an update
@@ -153,10 +163,15 @@ const AUTH_FAILURE_GUIDANCE: Record<AuthFailureKind, string> = {
     "password could not be read. Unlock your keychain or keyring, then try again.",
   transport:
     "Brightspace could not be reached to sign in. The saved session was kept. " +
-    "Check your connection and try again in a few minutes.",
+    "Call sign_in once more without visible; forcing a browser window does not help. " +
+    "If it fails again, ask the user to check their connection and try again in a few minutes.",
+  stuck:
+    "Sign-in got stuck on the school's sign-in page and stopped; the saved session was kept. " +
+    "Call sign_in again — no window is needed.",
   timeout:
     "The sign-in did not finish in time, usually a missed MFA prompt, and has stopped: the prompt it " +
     "sent no longer works. The next call starts a new sign-in, or says automatic sign-in is paused. " +
+    "Don't open a window to retry; a window does not skip the prompt. " +
     `Run \`${AUTH_COMMAND}\` in a terminal (from your home folder) to complete it with the number visible.`,
   failed:
     `The sign-in did not complete. Run \`${AUTH_COMMAND}\` in a terminal (from your home folder) to see why, ` +

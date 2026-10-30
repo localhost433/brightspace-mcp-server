@@ -67,6 +67,15 @@ function quickLinkFilePath(input: string, courseId: number, origin?: string): st
 function enforcedFilePath(input: string, courseId: number, origin?: string): string | { error: string } | null {
   let path = input;
   if (!path.startsWith("/")) {
+    // Check the raw authority before URL parsing can normalize it. The first
+    // literal slash must start the path, not occur inside a query or fragment.
+    const authorityStart = path.indexOf("//") + 2;
+    const pathStart = path.indexOf("/", authorityStart);
+    if (
+      pathStart <= authorityStart ||
+      /[?#\\\x00-\x20\x7f]/.test(path.slice(authorityStart, pathStart))
+    )
+      return null;
     let link: URL;
     try {
       link = new URL(path);
@@ -74,7 +83,7 @@ function enforcedFilePath(input: string, courseId: number, origin?: string): str
       return null;
     }
     if (!origin || link.origin !== new URL(origin).origin || link.username || link.password) return null;
-    path = path.slice(path.indexOf("/", path.indexOf("//") + 2));
+    path = path.slice(pathStart);
   }
   if (!path.startsWith(ENFORCED_PREFIX)) return null;
 

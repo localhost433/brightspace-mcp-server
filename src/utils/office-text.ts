@@ -5,7 +5,7 @@
  * Licensed under MIT — see LICENSE file for details.
  */
 
-import { extractZipEntry, listZipEntries } from "./zip-extract.js";
+import { extractZipEntry, listZipEntries, MAX_INFLATED_BYTES } from "./zip-extract.js";
 import {
   childElements,
   descendants,
@@ -27,9 +27,22 @@ import {
 const MAX_SHEET_ROWS = 500;
 const MAX_SHEET_COLS = 40;
 
+// One inflation budget per document, so a PPTX or XLSX can't spread a zip
+// bomb across many parts that each fit on their own (upstream issue #380).
+// A part that exists but fails to read (oversize included) ends the walk:
+// retrying the rest would re-inflate up to the budget once per part.
+const inflateBudgets = new WeakMap<Buffer, number>();
+
 function readXml(buffer: Buffer, name: string): XmlElement | null {
-  const data = extractZipEntry(buffer, name);
-  return data ? parseXml(data.toString("utf-8")) : null;
+  const budget = inflateBudgets.get(buffer) ?? MAX_INFLATED_BYTES;
+  if (budget <= 0) return null;
+  const data = extractZipEntry(buffer, name, budget);
+  if (!data) {
+    if (listZipEntries(buffer)?.includes(name)) inflateBudgets.set(buffer, 0);
+    return null;
+  }
+  inflateBudgets.set(buffer, budget - data.length);
+  return parseXml(data.toString("utf-8"));
 }
 
 /** Map relationship ids to resolved part paths for one .rels file. */

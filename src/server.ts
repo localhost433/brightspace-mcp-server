@@ -34,6 +34,7 @@ import {
   registerGetServerInfo,
   registerSearchCourse,
   registerSignOut,
+  registerSignIn,
   registerGetDropboxFolders,
   registerGetDropboxSubmissions,
   registerGetDropboxUserSubmissions,
@@ -160,6 +161,7 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
   registerGetServerInfo(server, config, version, apiClient);
   registerSearchCourse(server, apiClient);
   registerSignOut(server, config, apiClient, tokenManager, authRunner);
+  registerSignIn(server, config, tokenManager, authRunner);
   // Instructor / TA dropbox tools (read-only) — 403 for a student account.
   registerGetDropboxFolders(server, apiClient);
   registerGetDropboxSubmissions(server, apiClient);
@@ -167,7 +169,7 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
   registerGetDropboxFeedback(server, apiClient);
   registerGetRubricsForObject(server, apiClient);
   registerDownloadDropboxSubmissionFile(server, apiClient);
-  log("DEBUG", "MCP tools registered (27 tools)");
+  log("DEBUG", "MCP tools registered (28 tools)");
 
   // Register MCP prompts — surfaced in clients (e.g. Claude Desktop) as a
   // picker, distinct from tools. Each one is a canned user message that
