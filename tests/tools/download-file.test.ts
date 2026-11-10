@@ -446,6 +446,38 @@ describe("download_file: legacy Office originals under a modern customFilename",
   });
 });
 
+describe("download_file: Linux executables", () => {
+  function elfBuffer(): Buffer {
+    const buf = Buffer.alloc(4096);
+    Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01]).copy(buf, 0);
+    buf.writeUInt16LE(2, 16);
+    buf.writeUInt16LE(0x3e, 18);
+    return buf;
+  }
+
+  it("saves an ELF binary to disk without making it executable", async () => {
+    const { call } = setup({ disposition: 'attachment; filename="mpi_hello"', body: elfBuffer() });
+
+    const result = await call({ courseId: COURSE, topicId: 7, downloadPath: targetDir });
+
+    expect(result.isError).toBeFalsy();
+    const payload = parse(result);
+    expect(payload.filePath).toBe(path.join(targetDir, "mpi_hello"));
+    expect(payload.mimeType).toBe("application/x-elf");
+    const { mode } = await fs.stat(payload.filePath);
+    expect(mode & 0o111).toBe(0);
+  });
+
+  it("describes an ELF binary inline instead of refusing it", async () => {
+    const { call } = setup({ disposition: 'attachment; filename="mpi_hello"', body: elfBuffer() });
+
+    const result = await call({ courseId: COURSE, topicId: 7 });
+
+    expect(result.isError).toBeFalsy();
+    expect(parse(result).representation).toBe("binary_description_only");
+  });
+});
+
 describe("download_file: dropbox submissions", () => {
   const submission = (id: number, files: unknown[]) => ({ Id: id, Files: files });
   const file = (fileId: number, fileName: string, size = 1024) => ({

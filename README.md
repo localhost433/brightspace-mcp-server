@@ -15,6 +15,7 @@
 > - DOCX/XLSX/PPTX keep headings, lists, tables, cell values, dates and speaker notes; notebooks and zip archives are readable inline.
 > - Current-term course filtering by default, with a `term` argument on `get_my_courses`.
 > - Roster finds NYU TAs and course assistants, and shows sections.
+> - `download_file` saves Linux ELF executables (prebuilt cluster binaries), without the execute bit. Mach-O and Windows executables stay refused.
 
 Lets your AI see your Brightspace classes, so you can just ask:
 

@@ -116,6 +116,11 @@ export const ALLOWED_MIME_TYPES: string[] = [
   "video/mp4",
   "audio/mpeg",
   "audio/wav",
+  // Executables. Only Linux ELF, which HPC courses hand out as prebuilt
+  // cluster binaries: it cannot run on the macOS or Windows machine this
+  // server saves to, and the file is written without the execute bit. Mach-O
+  // and Windows PE, which would run here, stay refused.
+  "application/x-elf",
 ];
 
 /**

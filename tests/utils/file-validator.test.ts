@@ -219,10 +219,39 @@ describe("validateFileType: additional archive formats", () => {
 
   it("still refuses an unrelated binary type even with archives allowed", async () => {
     // Regression guard: adding archive mimes must not widen the allowlist to
-    // arbitrary binaries. An ELF executable's magic bytes must still be denied.
-    const elf = Buffer.alloc(64);
-    Buffer.from([0x7f, 0x45, 0x4c, 0x46]).copy(elf, 0);
-    const error = await validateFileType(elf, undefined, "evil.bin").catch((e) => e);
+    // arbitrary binaries. A Windows executable's magic bytes must still be denied.
+    const exe = Buffer.concat([Buffer.from([0x4d, 0x5a, 0x90, 0x00]), Buffer.alloc(256)]);
+    const error = await validateFileType(exe, undefined, "evil.bin").catch((e) => e);
+    expect(error).toBeInstanceOf(DownloadError);
+  });
+});
+
+describe("validateFileType: executables", () => {
+  /** A 64-bit x86-64 ELF header, how a Linux binary handed out for a cluster begins. */
+  function elfBuffer(): Buffer {
+    const buf = Buffer.alloc(64);
+    Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01]).copy(buf, 0);
+    buf.writeUInt16LE(2, 16);
+    buf.writeUInt16LE(0x3e, 18);
+    return buf;
+  }
+
+  it("accepts a Linux ELF executable", async () => {
+    await expect(validateFileType(elfBuffer(), undefined, "a.out")).resolves.toMatchObject({
+      mime: "application/x-elf",
+    });
+  });
+
+  it("refuses a macOS Mach-O executable, which would run on this machine", async () => {
+    const macho = Buffer.alloc(64);
+    Buffer.from([0xcf, 0xfa, 0xed, 0xfe, 0x07, 0x00, 0x00, 0x01]).copy(macho, 0);
+    const error = await validateFileType(macho, undefined, "tool").catch((e) => e);
+    expect(error).toBeInstanceOf(DownloadError);
+  });
+
+  it("refuses a Windows PE executable", async () => {
+    const exe = Buffer.concat([Buffer.from([0x4d, 0x5a, 0x90, 0x00]), Buffer.alloc(256)]);
+    const error = await validateFileType(exe, undefined, "tool.exe").catch((e) => e);
     expect(error).toBeInstanceOf(DownloadError);
   });
 });
