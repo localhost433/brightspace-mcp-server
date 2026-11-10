@@ -8,6 +8,7 @@ import { D2LApiClient, DEFAULT_CACHE_TTLS } from "../api/index.js";
 import { fetchAllObjects } from "../api/paginate.js";
 import { mapWithConcurrency } from "../utils/concurrency.js";
 import { log } from "../utils/logger.js";
+import { isAuthUnavailable } from "./tool-helpers.js";
 
 export interface TopicCompletion {
   completed: boolean;
@@ -59,6 +60,8 @@ function fromProgressRow(row: ProgressRow): [number, TopicCompletion] | null {
  * reported as incomplete. When it is refused or comes back empty, this asks
  * /content/topics/{id}/completions/ for each topic instead, keeping only the
  * signed-in user's row so an instructor's view of everyone cannot leak in.
+ * A refused or pending sign-in is not a missing route: it fails the lookup
+ * instead of passing for "nothing completed".
  */
 export async function fetchTopicCompletions(
   apiClient: D2LApiClient,
@@ -79,6 +82,7 @@ export async function fetchTopicCompletions(
     }
     if (completions.size > 0) return { completions, source: "userprogress" };
   } catch (error) {
+    if (isAuthUnavailable(error)) throw error;
     log("DEBUG", `content completion: userprogress unavailable for course ${courseId}`, error);
   }
 
@@ -92,6 +96,7 @@ export async function fetchTopicCompletions(
     myId = Number(me.Identifier);
     if (!Number.isSafeInteger(myId)) return { completions, source: "unavailable" };
   } catch (error) {
+    if (isAuthUnavailable(error)) throw error;
     log("DEBUG", "content completion: whoami unavailable", error);
     return { completions, source: "unavailable" };
   }
@@ -111,6 +116,7 @@ export async function fetchTopicCompletions(
         mine ? { completed: true, ...(mine.CompletionDate ? { completedDate: mine.CompletionDate } : {}) } : { completed: false }
       );
     } catch (error) {
+      if (isAuthUnavailable(error)) throw error;
       log("DEBUG", `content completion: topic ${topicId} completions unavailable`, error);
     }
   });

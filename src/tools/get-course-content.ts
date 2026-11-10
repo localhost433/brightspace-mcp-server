@@ -34,6 +34,7 @@ export interface ContentObject {
   // Topic-specific
   TopicType?: number; // 1=File, 2=Link/URL, 3=ExternalLink, etc.
   Url?: string;
+  TypeIdentifier?: string;
   StartDateTime?: string | null;
   EndDateTime?: string | null;
   StartDate?: string | null;
@@ -205,7 +206,7 @@ export async function buildContentTree(
   apiClient: D2LApiClient,
   courseId: number,
   modules: ContentObject[],
-  progressMap: Map<number, ContentProgress>,
+  progressMap: Map<number, ContentProgress> | null,
   typeFilter: string,
   maxDepth?: number,
   currentDepth: number = 0,
@@ -283,7 +284,9 @@ export async function buildContentTree(
         continue;
       }
 
-      const topicProgress = progressMap.get(item.Id);
+      // A null map means progress couldn't be read: completion is unknown,
+      // not false, so a failed read can't pass for "nothing completed".
+      const topicProgress = progressMap?.get(item.Id);
 
       const topic: any = {
         type: 'topic',
@@ -295,7 +298,7 @@ export async function buildContentTree(
         ...availabilityFields(availability),
         ...(item.DueDate ? { dueDate: item.DueDate } : {}),
         lastModified: item.LastModifiedDate ?? null,
-        isCompleted: topicProgress?.IsRead ?? false,
+        isCompleted: progressMap === null ? null : topicProgress?.IsRead ?? false,
         ...(topicProgress?.DateCompleted ? { completedDate: topicProgress.DateCompleted } : {}),
       };
 
@@ -314,6 +317,13 @@ export async function buildContentTree(
           topic.linksTo = activity.kind;
           if (typeof item.ToolItemId === "number") topic[activity.idField] = item.ToolItemId;
         }
+      }
+
+      // An embedded video (D2L's ContentService type) has no file behind it.
+      // Said outright so it is not taken for a file that is missing.
+      if (typeof item.TypeIdentifier === 'string' && item.TypeIdentifier.toLowerCase() === 'contentservice') {
+        topic.embeddedMedia = true;
+        topic.note = 'Embedded media: download_file cannot fetch it. Open it in Brightspace, or use get_video_transcript for its transcript.';
       }
 
       // HTML content — include body converted to markdown
@@ -373,23 +383,27 @@ export function collectTopicIds(tree: any[]): number[] {
 
 /**
  * Mark each topic's completion and give each module a completed/total count
- * of the topics beneath it. Returns the totals for the whole tree.
+ * of the topics beneath it. Returns the totals for the whole tree. When
+ * completion could not be read at all (`known` false), each topic's
+ * isCompleted is null, not false, so a failed read can't pass for "nothing
+ * completed".
  */
 export function applyCompletions(
   tree: any[],
-  completions: Map<number, TopicCompletion>
+  completions: Map<number, TopicCompletion>,
+  known: boolean = true
 ): { completed: number; total: number } {
   let completed = 0;
   let total = 0;
   for (const item of tree) {
     if (item.type === 'topic') {
       const c = completions.get(item.id);
-      item.isCompleted = c?.completed ?? false;
+      item.isCompleted = known ? c?.completed ?? false : null;
       if (c?.completedDate) item.completedDate = c.completedDate;
       total++;
       if (item.isCompleted) completed++;
     } else if (item.type === 'module') {
-      const sub = applyCompletions(item.children ?? [], completions);
+      const sub = applyCompletions(item.children ?? [], completions, known);
       if (sub.total > 0) item.completion = sub;
       completed += sub.completed;
       total += sub.total;
@@ -504,7 +518,7 @@ export function registerGetCourseContent(
           courseId,
           collectTopicIds(contentTree)
         );
-        const completion = applyCompletions(contentTree, completions);
+        const completion = applyCompletions(contentTree, completions, completionSource !== "unavailable");
 
         const topicCount = countTopics(contentTree);
         const moduleCount = countModules(contentTree);
@@ -522,7 +536,11 @@ export function registerGetCourseContent(
           completedTopicCount: completion.completed,
           completionSource,
           ...(completionSource === "unavailable"
-            ? { completionNote: "Brightspace refused every completion lookup for this course, so isCompleted is unknown (reported as false), not a measurement." }
+            ? {
+                progressUnavailable:
+                  "Couldn't read this user's completion progress, so every topic has isCompleted null. " +
+                  "Do not report topics as not completed; try again later.",
+              }
             : {}),
           ...(modifiedSince ? { modifiedSince, returned: topicCount, filteredOut } : {}),
           ...(unreadable > 0

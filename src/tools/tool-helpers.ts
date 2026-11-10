@@ -131,7 +131,8 @@ const MFA_SAME_PROMPT =
 /** Entra number match only: purdue-sso.ts asks for another request when one expires or is denied. */
 const MFA_NEW_NUMBER =
   "If Microsoft's number expires or is denied, the sign-in asks Microsoft for a new one by itself " +
-  "and the next answer shows it; always give the user the latest number.";
+  "and the next answer shows it, with its own 5 minutes to approve (at most twice, so a sign-in can run up " +
+  "to 15 minutes in all); always give the user the latest number.";
 
 /**
  * Why a missed prompt cannot be skipped. Microsoft keeps a prompt open for up
@@ -282,6 +283,14 @@ const DOWNLOAD_FAILURE_GUIDANCE: Record<DownloadFailureKind, string> = {
   tooLarge:
     "The file is larger than the download size limit. " +
     "Open it from Brightspace in a browser instead.",
+  incomplete:
+    "Download incomplete: the connection closed before the whole file arrived, so nothing was saved. " +
+    "Try again.",
+  empty:
+    "The file is empty (0 bytes) on Brightspace, so nothing was saved.",
+  forbiddenDestination:
+    "That folder is not an allowed place to save files: it is the home folder itself, a drive root, a hidden folder, a system folder or an application-data folder. " +
+    "Choose a folder such as ~/Documents/Brightspace, or have the person who runs the server add the folder to D2L_DOWNLOAD_ROOTS.",
 };
 
 /**

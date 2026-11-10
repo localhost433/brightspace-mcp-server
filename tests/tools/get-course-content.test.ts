@@ -593,7 +593,18 @@ describe("get_course_content completion fallback", () => {
     const body = JSON.parse((await call({ courseId: COURSE_ID })).content[0].text);
 
     expect(body.completionSource).toBe("unavailable");
-    expect(body.completionNote).toMatch(/unknown/);
+    expect(body.contentTree[0].children.map((t: any) => t.isCompleted)).toEqual([null, null]);
+    expect(body.progressUnavailable).toMatch(/Do not report topics as not completed/);
+  });
+
+  it("fails the call when a topic's completions read hits a refused sign-in", async () => {
+    const { call } = setupFallback(() => {
+      throw new ApiError(401, "/content/topics/1/completions/", "Unauthorized");
+    });
+
+    const result = await call({ courseId: COURSE_ID });
+
+    expect(result.isError).toBe(true);
   });
 });
 
@@ -704,5 +715,85 @@ describe("get_course_content courseFiles", () => {
 
   it("drops paths that parseCoursePath would refuse", async () => {
     expect(await courseFilesFor(link("..%2fsecret.pdf") + link("Notes%2fok.pdf"))).toEqual(["Notes/ok.pdf"]);
+  });
+});
+
+/**
+ * A failed progress read used to leave every topic isCompleted: false, which
+ * the AI app reported as "you haven't finished anything". Completion is now
+ * null with a progressUnavailable note, and a sign-in failure fails the call.
+ */
+describe("get_course_content progress read failures", () => {
+  const TOPIC = {
+    Id: 9,
+    Title: "Lecture 1",
+    ShortTitle: null,
+    Type: 1,
+    TopicType: 1,
+    Description: null,
+    IsHidden: false,
+    IsLocked: false,
+    DueDate: null,
+    LastModifiedDate: null,
+  };
+
+  // The fork falls back to whoami plus per-topic completions when
+  // userprogress fails, so those routes are mocked too.
+  function setupWithProgress(progress: () => unknown, whoami: () => unknown = () => ({ Identifier: "7" })) {
+    const apiClient = {
+      le: (orgUnitId: number, p: string) => `/d2l/api/le/1.0/${orgUnitId}${p}`,
+      lp: (p: string) => `/d2l/api/lp/1.0${p}`,
+      get: vi.fn(async (path: string) => {
+        if (path.endsWith("/content/userprogress/")) return progress();
+        if (path.endsWith("/users/whoami")) return whoami();
+        if (path.endsWith("/content/root/")) return [TOPIC];
+        if (/\/content\/topics\/\d+\/completions\/$/.test(path)) return { Objects: [], Next: null };
+        return [];
+      }),
+    };
+    let handler: (args: unknown) => Promise<any>;
+    const server = {
+      registerTool: (_n: string, _m: unknown, fn: (args: unknown) => Promise<any>) => {
+        handler = fn;
+      },
+    };
+    registerGetCourseContent(server as any, apiClient as any);
+    return (args: unknown) => handler!(args);
+  }
+
+  it("reports completion as unknown when the progress reads fail with a 5xx", async () => {
+    const unavailable = () => {
+      throw new ApiError(503, "/content/userprogress/", "Service Unavailable");
+    };
+    const call = setupWithProgress(unavailable, unavailable);
+    const result = await call({ courseId: COURSE_ID });
+    expect(result.isError).toBeFalsy();
+    const body = JSON.parse(result.content[0].text);
+    expect(body.contentTree[0].isCompleted).toBeNull();
+    expect(body.progressUnavailable).toMatch(/Do not report topics as not completed/);
+  });
+
+  it("keeps isCompleted false and adds no note when the course has no progress data (404)", async () => {
+    const call = setupWithProgress(() => {
+      throw new ApiError(404, "/content/userprogress/", "Not Found");
+    });
+    const body = JSON.parse((await call({ courseId: COURSE_ID })).content[0].text);
+    expect(body.contentTree[0].isCompleted).toBe(false);
+    expect(body).not.toHaveProperty("progressUnavailable");
+  });
+
+  it("reads completion from progress when the read succeeds", async () => {
+    const call = setupWithProgress(() => [{ ContentObjectId: 9, IsRead: true, DateCompleted: null }]);
+    const body = JSON.parse((await call({ courseId: COURSE_ID })).content[0].text);
+    expect(body.contentTree[0].isCompleted).toBe(true);
+    expect(body).not.toHaveProperty("progressUnavailable");
+  });
+
+  it("fails the call when the progress read hits a refused sign-in", async () => {
+    const call = setupWithProgress(() => {
+      throw new ApiError(401, "/content/userprogress/", "Unauthorized");
+    });
+    const result = await call({ courseId: COURSE_ID });
+    expect(result.isError).toBe(true);
   });
 });
